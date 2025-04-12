@@ -113,8 +113,9 @@ class ProfitTrailing:
             return new_trailing, new_max_profit / entry, rule
         else:
             # Default: use the fixed offset from config.
-            default_offset = config.FIXED_STOP_OFFSET  # e.g., 500 points
+            default_offset = entry * (config.FIXED_STOP_OFFSET_PERCENT / 100)
             default_sl = entry - default_offset if size > 0 else entry + default_offset
+
             stored_trailing = self.position_trailing_stop.get(order_id)
             if stored_trailing is not None:
                 new_trailing = max(stored_trailing, default_sl) if size > 0 else min(stored_trailing, default_sl)
