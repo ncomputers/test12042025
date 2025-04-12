@@ -8,6 +8,11 @@ import redis
 import json
 from difflib import SequenceMatcher
 import threading
+import torch
+
+# Check for CUDA
+use_cuda = torch.cuda.is_available()
+print("CUDA is available, using GPU acceleration for OCR." if use_cuda else "CUDA not available, using CPU.")
 
 # Redis connection
 r = redis.Redis(host='localhost', port=6379, db=0)
@@ -34,7 +39,7 @@ if not test_imshow():
 url = "https://www.youtube.com/live/jkP1Sw7M2iU"
 
 # OCR reader
-reader = easyocr.Reader(['en'])
+reader = easyocr.Reader(['en'], gpu=use_cuda)
 
 class YouTubeStream:
     def __init__(self, url):
