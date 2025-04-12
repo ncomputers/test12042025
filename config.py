@@ -5,10 +5,13 @@ from dataclasses import dataclass
 # Load environment variables from .env file if present.
 load_dotenv()
 
-FIXED_STOP_OFFSET = int(os.getenv('FIXED_STOP_OFFSET', 500))
-ORDER_ENTRY_OFFSET = float(os.getenv("ORDER_ENTRY_OFFSET", 50))
-ORDER_SL_OFFSET = float(os.getenv("ORDER_SL_OFFSET", 500))
-ORDER_TP_OFFSET = float(os.getenv("ORDER_TP_OFFSET", 3000))
+#FIXED_STOP_OFFSET = int(os.getenv('FIXED_STOP_OFFSET', 500))
+# Instead of fixed amounts, define offset percentages (as a percentage of the raw price)
+ORDER_ENTRY_OFFSET_PERCENT = float(os.getenv("ORDER_ENTRY_OFFSET_PERCENT", 0.06))
+ORDER_SL_OFFSET_PERCENT = float(os.getenv("ORDER_SL_OFFSET_PERCENT", 0.60))
+ORDER_TP_OFFSET_PERCENT = float(os.getenv("ORDER_TP_OFFSET_PERCENT", 3.61))
+FIXED_STOP_OFFSET_PERCENT = float(os.getenv('FIXED_STOP_OFFSET_PERCENT', 0.60))
+
 
 
 @dataclass(frozen=True)
