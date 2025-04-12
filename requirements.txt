@@ -6,7 +6,6 @@ websocket-client
 pycryptodome
 requests
 redis
-opencv-python
 yt-dlp
 easyocr
 numpy
