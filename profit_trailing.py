@@ -1,6 +1,7 @@
 import time
 import logging
 import threading
+import json
 from typing import Dict, Any, List, Optional, Tuple
 from exchange import DeltaExchangeClient
 import config
@@ -64,23 +65,20 @@ class ProfitTrailing:
         """
         Updates the trailing stop for a given position.
 
-        This function does the following:
-        - Attempts to retrieve a valid order ID from 'id' or 'orderId'. If none is found,
-        it generates a unique identifier based on the position data.
-        - Calculates the current profit (in absolute points) and updates the maximum profit achieved.
-        - If the take profit signal has been detected and the current profit is positive,
-        it applies the "lock_50" rule (stop loss is set to entry plus half the maximum profit for longs,
-        or entry minus half for shorts). Otherwise, if maximum profit exceeds 1000 points,
-        it moves the stop loss to the entry (break-even). If neither condition is met,
-        it uses a fixed offset from the entry price (defined in config).
+        - Tries to get a valid order identifier from 'id' or 'orderId'.
+        - If no identifier exists, it generates one by computing a hash of the JSON string of the position data (with keys sorted).
+        - Calculates the current profit (in absolute points) and updates the maximum profit.
+        - If the take profit signal is detected and current profit is positive, applies the "lock_50" rule.
+        - Else if maximum profit exceeds 1000 points and profit is positive, sets the stop loss at the entry (break-even).
+        - Otherwise, uses a default fixed offset (expressed as a percentage of the entry) from the config.
 
         Returns a tuple: (new_trailing_stop, profit_ratio, rule)
         """
-        # Obtain order ID; if not found, generate one.
+        # Obtain order ID; if not present, generate one from a JSON string of the position.
         order_id = pos.get('id') or pos.get('orderId')
         if not order_id:
-            order_id = str(hash(frozenset(pos.items())))
-        
+            order_id = str(hash(json.dumps(pos, sort_keys=True)))
+
         entry = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
         try:
             entry = float(entry)
@@ -94,28 +92,27 @@ class ProfitTrailing:
         # Calculate current profit in absolute points.
         current_profit = live_price - entry if size > 0 else entry - live_price
 
-        # Update maximum profit for this order.
+        # Update maximum profit achieved for this order.
         prev_max = self.position_max_profit.get(order_id, 0)
         new_max_profit = max(prev_max, current_profit)
         self.position_max_profit[order_id] = new_max_profit
 
-        # If take profit is detected and current profit is positive, use lock_50 rule.
+        # If take profit is detected and current profit is positive, apply lock_50 rule.
         if self.take_profit_detected and current_profit > 0:
             new_trailing = entry + new_max_profit / 2 if size > 0 else entry - new_max_profit / 2
             rule = "lock_50"
             self.position_trailing_stop[order_id] = new_trailing
             return new_trailing, new_max_profit / entry, rule
-        # Otherwise, if max profit > 1000 points and current profit is positive, use break-even rule.
+        # Otherwise, if profit exceeds 1000 points and current profit is positive, switch to break-even.
         elif new_max_profit > 1000 and current_profit > 0:
             new_trailing = entry
             rule = "break_even"
             self.position_trailing_stop[order_id] = new_trailing
             return new_trailing, new_max_profit / entry, rule
         else:
-            # Default: use the fixed offset from config.
+            # Use fixed offset defined in config (as percentage, if desired).
             default_offset = entry * (config.FIXED_STOP_OFFSET_PERCENT / 100)
             default_sl = entry - default_offset if size > 0 else entry + default_offset
-
             stored_trailing = self.position_trailing_stop.get(order_id)
             if stored_trailing is not None:
                 new_trailing = max(stored_trailing, default_sl) if size > 0 else min(stored_trailing, default_sl)
@@ -123,8 +120,6 @@ class ProfitTrailing:
                 new_trailing = default_sl
             self.position_trailing_stop[order_id] = new_trailing
             return new_trailing, current_profit / entry, "fixed_stop"
-
-
 
     def compute_raw_profit(self, pos: Dict[str, Any], live_price: float) -> Optional[float]:
         entry = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
