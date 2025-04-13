@@ -18,7 +18,7 @@ print("CUDA is available, using GPU acceleration for OCR." if use_cuda else "CUD
 r = redis.Redis(host='localhost', port=6379, db=0)
 
 # GUI check
-DISPLAY_GUI = False
+DISPLAY_GUI = True
 if platform.system().lower() in ["linux", "darwin"]:
     DISPLAY_GUI = False
 
@@ -76,9 +76,8 @@ DEMAND_ZONE_KEYWORDS = ["demand zone", "dem zone", "d zone", "dem zo", "dmd zone
 def yt_main_loop():
     prev_aggregated = None
     first_signal_set = False
-
     last_known_signal = {"text": "", "price": "", "coordinates": ""}
-    
+
     while True:
         try:
             stream = YouTubeStream(url)
@@ -98,24 +97,18 @@ def yt_main_loop():
                 else:
                     retry_count = 0
 
-                # Crop the rightmost 25% of the frame
                 height, width = frame.shape[:2]
                 roi_start = int(width * 0.75)
                 roi = frame[:, roi_start:width]
-
-                # Convert the cropped region to grayscale
                 gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-                # Run OCR on the cropped region
                 results = reader.readtext(gray_roi)
 
                 recognized_signals = []
                 all_signals = []
-                
+
                 for (bbox, text, prob) in results:
-                    # Adjust bounding box coordinates relative to the full frame
                     (tl, tr, br, bl) = bbox
-                    # Offset the x coordinates by roi_start to map back to the full frame
                     tl = (int(tl[0] + roi_start), int(tl[1]))
                     br = (int(br[0] + roi_start), int(br[1]))
                     x1, y1 = tl
@@ -125,9 +118,9 @@ def yt_main_loop():
                     if is_trading_signal(lower_text):
                         all_signals.append((x1, y1, text))
                     elif any(fuzzy_match(lower_text, kw) for kw in SUPPLY_ZONE_KEYWORDS):
-                        pass  # ignored: zone detection disabled
+                        pass
                     elif any(fuzzy_match(lower_text, kw) for kw in DEMAND_ZONE_KEYWORDS):
-                        pass  # ignored: zone detection disabled
+                        pass
 
                 last_signal_data = {"text": "", "price": "", "coordinates": ""}
 
@@ -152,7 +145,6 @@ def yt_main_loop():
                 if last_signal_data.get("text"):
                     last_known_signal = last_signal_data
 
-                # Clear zone detection data
                 supply_zone_data = {"min": "", "max": ""}
                 demand_zone_data = {"min": "", "max": ""}
 
@@ -176,19 +168,20 @@ def yt_main_loop():
                         print("Redis update error:", e)
 
                 if DISPLAY_GUI:
-                    # Display the full frame with an overlay rectangle highlighting the ROI
                     disp_frame = cv2.resize(frame, (1366, 720))
                     cv2.rectangle(disp_frame, (roi_start, 0), (width, height), (0, 255, 0), 2)
                     cv2.imshow("YouTube Live Stream - Signal Detection", disp_frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         stream.release()
-                        cv2.destroyAllWindows()
+                        if DISPLAY_GUI:
+                            cv2.destroyAllWindows()
                         return
 
                 time.sleep(10)
 
             stream.release()
-            cv2.destroyAllWindows()
+            if DISPLAY_GUI:
+                cv2.destroyAllWindows()
             time.sleep(5)
 
         except Exception as e:
@@ -196,7 +189,8 @@ def yt_main_loop():
             time.sleep(5)
             if 'stream' in locals():
                 stream.release()
-            cv2.destroyAllWindows()
+            if DISPLAY_GUI:
+                cv2.destroyAllWindows()
 
 def run_in_thread():
     t = threading.Thread(target=yt_main_loop, name="YouTubeOCR")
