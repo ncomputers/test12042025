@@ -129,18 +129,18 @@ class SignalProcessor:
                             size = 0.0
                         if size == 0:
                             continue
-                        # For long positions: if in loss, force-close.
+                        # For long positions: if in loss or break-even, force-close.
                         if size > 0:
                             profit_pct = (live_price - entry) / entry
-                            if profit_pct < 0:
+                            if profit_pct <= 0:
                                 close_order = self.trade_manager.place_market_order(
                                     "BTCUSD", "sell", size, params={"time_in_force": "ioc"}, force=True
                                 )
                                 logger.info("TP signal: Force closing long position in loss. Close order: %s", close_order)
-                        # For short positions: if in loss, force-close.
+                        # For short positions: if in loss or break-even, force-close.
                         elif size < 0:
                             profit_pct = (entry - live_price) / entry
-                            if profit_pct < 0:
+                            if profit_pct <= 0:
                                 close_order = self.trade_manager.place_market_order(
                                     "BTCUSD", "buy", abs(size), params={"time_in_force": "ioc"}, force=True
                                 )
@@ -198,13 +198,13 @@ class SignalProcessor:
 
         # Compute order parameters based on configurable offsets.
         if new_side == "buy":
-            entry_price = float(raw_price) - config.ORDER_ENTRY_OFFSET
-            sl_price = float(raw_price) - config.ORDER_SL_OFFSET
-            tp_price = float(raw_price) + config.ORDER_TP_OFFSET
+            entry_price = float(raw_price) - (float(raw_price) * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
+            sl_price = float(raw_price) - (float(raw_price) * (config.ORDER_SL_OFFSET_PERCENT / 100))
+            tp_price = float(raw_price) + (float(raw_price) * (config.ORDER_TP_OFFSET_PERCENT / 100))
         elif new_side == "sell":
-            entry_price = float(raw_price) + config.ORDER_ENTRY_OFFSET
-            sl_price = float(raw_price) + config.ORDER_SL_OFFSET
-            tp_price = float(raw_price) - config.ORDER_TP_OFFSET
+            entry_price = float(raw_price) + (float(raw_price) * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
+            sl_price = float(raw_price) + (float(raw_price) * (config.ORDER_SL_OFFSET_PERCENT / 100))
+            tp_price = float(raw_price) - (float(raw_price) * (config.ORDER_TP_OFFSET_PERCENT / 100))
         else:
             logger.warning("Unable to determine side for signal: %s", signal_text)
             return None
