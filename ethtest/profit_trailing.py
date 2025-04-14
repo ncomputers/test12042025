@@ -228,6 +228,7 @@ class ProfitTrailing:
                     profit_display = profit_pct * 100 if profit_pct is not None else 0
                     raw_profit = self.compute_raw_profit(pos, live_price)
                     profit_usd = raw_profit / 100 if raw_profit is not None else 0
+                    #123
                     trailing_stop, ratio, rule = self.update_trailing_stop(pos, live_price)
                     side = "long" if size > 0 else "short"
                     max_profit = self.position_max_profit.get(key, 0)
