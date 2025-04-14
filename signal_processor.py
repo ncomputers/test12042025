@@ -90,11 +90,22 @@ class SignalProcessor:
             return None
 
         last_signal = signal_data.get("last_signal", {})
+        signal_text = last_signal.get("text", "").lower()
+
+        # Set or reset the TP flag based on the signal text.
+        if "take profit" in signal_text or "tp" in signal_text:
+            logger.info("Take profit signal detected. Activating 50% lock rule.")
+            if self.profit_trailing:
+                self.profit_trailing.take_profit_detected = True
+        else:
+            logger.info("Non-TP signal detected. Deactivating 50% lock rule.")
+            if self.profit_trailing:
+                self.profit_trailing.take_profit_detected = False
+
+        raw_price = last_signal.get("price")
         supply_zone = signal_data.get("supply_zone", {})
         demand_zone = signal_data.get("demand_zone", {})
 
-        signal_text = last_signal.get("text", "").lower()
-        raw_price = last_signal.get("price")
         raw_supply = supply_zone.get("min")
         raw_demand = demand_zone.get("min")
 
@@ -107,65 +118,6 @@ class SignalProcessor:
             raw_price = live_price
             logger.info("Using live price as fallback: %.2f", raw_price)
 
-        # Process take profit signals.
-        if "take profit" in signal_text or "tp" in signal_text:
-            logger.info("Take profit signal detected.")
-            # Set the flag on the shared ProfitTrailing instance
-            if self.profit_trailing:
-                self.profit_trailing.take_profit_detected = True
-            live_price = self.ws.current_price
-            if live_price is None:
-                logger.error("Live price unavailable for TP signal processing.")
-                return None
-            try:
-                positions = self.order_manager.client.fetch_positions()
-                for pos in positions:
-                    pos_symbol = pos.get("info", {}).get("product_symbol") or pos.get("symbol")
-                    if pos_symbol and "BTCUSD" in pos_symbol:
-                        entry = pos.get("entryPrice") or pos.get("entry_price") or pos.get("info", {}).get("entry_price")
-                        try:
-                            entry = float(entry)
-                        except Exception:
-                            continue
-                        try:
-                            size = float(pos.get("size") or pos.get("contracts") or 0)
-                        except Exception:
-                            size = 0.0
-                        if size == 0:
-                            continue
-                        # For long positions: if in loss, force close using a market sell order.
-                        if size > 0:
-                            profit_pct = (live_price - entry) / entry
-                            if profit_pct < 0:
-                                close_order = self.trade_manager.place_market_order(
-                                    "BTCUSD", "sell", size, params={"time_in_force": "ioc"}, force=True
-                                )
-                                logger.info("TP signal: Force closing long position in loss. Close order: %s", close_order)
-                                # After closing, skip further processing for this TP signal.
-                                continue
-                        # For short positions: if in loss, force close using a market buy order.
-                        elif size < 0:
-                            profit_pct = (entry - live_price) / entry
-                            if profit_pct < 0:
-                                close_order = self.trade_manager.place_market_order(
-                                    "BTCUSD", "buy", abs(size), params={"time_in_force": "ioc"}, force=True
-                                )
-                                logger.info("TP signal: Force closing short position in loss. Close order: %s", close_order)
-                                continue
-            except Exception as e:
-                logger.error("Error processing TP signal: %s", e)
-            # Return immediately to skip new order placement after a TP signal.
-            return None
-
-
-        # Determine new order side based on signal text.
-        if "short" in signal_text:
-            new_side = "sell"
-        elif "buy" in signal_text:
-            new_side = "buy"
-        else:
-            new_side = None
-
         try:
             positions = self.order_manager.client.fetch_positions()
             for pos in positions:
@@ -175,13 +127,13 @@ class SignalProcessor:
                         pos_size = float(pos.get("size") or pos.get("contracts") or 0)
                     except Exception:
                         pos_size = 0.0
-                    if new_side == "buy" and pos_size < 0:
+                    if "buy" in signal_text and pos_size < 0:
                         logger.info("Opposite signal received: Forcing closure of existing short position before buying.")
                         self.trade_manager.place_market_order(
                             "BTCUSD", "buy", abs(pos_size), params={"time_in_force": "ioc"}, force=True
                         )
                         time.sleep(2)
-                    elif new_side == "sell" and pos_size > 0:
+                    elif "sell" in signal_text and pos_size > 0:
                         logger.info("Opposite signal received: Forcing closure of existing long position before selling.")
                         self.trade_manager.place_market_order(
                             "BTCUSD", "sell", pos_size, params={"time_in_force": "ioc"}, force=True
@@ -191,23 +143,25 @@ class SignalProcessor:
             logger.error("Error handling opposite positions: %s", e)
 
         # Cancel conflicting and same-side orders.
-        self.cancel_conflicting_orders("BTCUSD", new_side)
-        self.cancel_same_side_orders("BTCUSD", new_side)
+        self.cancel_conflicting_orders("BTCUSD", "buy" if "buy" in signal_text else "sell")
+        self.cancel_same_side_orders("BTCUSD", "buy" if "buy" in signal_text else "sell")
         time.sleep(2)
 
-        if self.order_manager.has_open_position("BTCUSD", new_side):
-            logger.info("An open %s position exists for BTCUSD. Skipping new order placement.", new_side)
+        if self.order_manager.has_open_position("BTCUSD", "buy" if "buy" in signal_text else "sell"):
+            logger.info("An open %s position exists for BTCUSD. Skipping new order placement.",
+                        "buy" if "buy" in signal_text else "sell")
             return None
 
         if raw_supply is None or raw_demand is None:
             logger.error("Incomplete signal data (supply/demand missing): %s", signal_data)
             return None
 
-        if new_side == "buy":
+        # Calculate entry, stop-loss, and take profit prices.
+        if "buy" in signal_text:
             entry_price = float(raw_price) - (float(raw_price) * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
             sl_price = float(raw_price) - (float(raw_price) * (config.ORDER_SL_OFFSET_PERCENT / 100))
             tp_price = float(raw_price) + (float(raw_price) * (config.ORDER_TP_OFFSET_PERCENT / 100))
-        elif new_side == "sell":
+        elif "sell" in signal_text or "short" in signal_text:
             entry_price = float(raw_price) + (float(raw_price) * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
             sl_price = float(raw_price) + (float(raw_price) * (config.ORDER_SL_OFFSET_PERCENT / 100))
             tp_price = float(raw_price) - (float(raw_price) * (config.ORDER_TP_OFFSET_PERCENT / 100))
@@ -219,8 +173,11 @@ class SignalProcessor:
                     last_signal.get("text"), entry_price, sl_price, tp_price)
 
         try:
-            limit_order = self.order_manager.place_order("BTCUSD", new_side, 1, entry_price,
-                                                          params={"time_in_force": "gtc"})
+            limit_order = self.order_manager.place_order("BTCUSD", 
+                                                        "buy" if "buy" in signal_text else "sell", 
+                                                        1, 
+                                                        entry_price,
+                                                        params={"time_in_force": "gtc"})
             logger.info("Limit order placed: %s", limit_order)
         except Exception as e:
             logger.error("Failed to place limit order: %s", e)
@@ -245,6 +202,7 @@ class SignalProcessor:
         except Exception as e:
             logger.error("Failed to attach bracket: %s", e)
             return None
+
 
     def signals_are_different(self, new_signal: Dict[str, Any], old_signal: Optional[Dict[str, Any]]) -> bool:
         new_text = new_signal.get("last_signal", {}).get("text", "").strip().lower()
