@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 class SignalProcessor:
     """
     Processes trading signals from Redis and executes order actions.
-    Uses a shared BinanceWebsocket instance (injected via constructor)
-    for accessing the live price. Optionally, you can pass in a ProfitTrailing
-    instance which will have its take_profit_detected flag set when a TP signal is detected.
+    Uses a shared BinanceWebsocket instance for accessing live price.
+    If a ProfitTrailing instance is provided, its take_profit_detected flag is updated
+    when a take profit signal is detected.
     """
     def __init__(self, ws_instance, profit_trailing: Optional[Any] = None) -> None:
-        self.ws = ws_instance  # Shared BinanceWebsocket instance.
+        self.ws = ws_instance
         self.profit_trailing = profit_trailing
         self.order_manager = OrderManager()
         self.trade_manager = TradeManager()
@@ -93,7 +93,7 @@ class SignalProcessor:
         raw_supply = supply_zone.get("min")
         raw_demand = demand_zone.get("min")
 
-        # Use live price as fallback if no raw price is provided.
+        # Use live price as fallback if raw price is missing.
         if raw_price is None or str(raw_price).strip() == "":
             live_price = self.ws.current_price
             if live_price is None:
@@ -105,10 +105,9 @@ class SignalProcessor:
         # Process take profit signals.
         if "take profit" in signal_text or "tp" in signal_text:
             logger.info("Take profit signal detected.")
-            # Set the flag in ProfitTrailing (if available) so that trailing logic switches rule.
+            # IMPORTANT: Update the flag on the shared ProfitTrailing instance.
             if self.profit_trailing:
                 self.profit_trailing.take_profit_detected = True
-
             live_price = self.ws.current_price
             if live_price is None:
                 logger.error("Live price unavailable for TP signal processing.")
@@ -129,18 +128,18 @@ class SignalProcessor:
                             size = 0.0
                         if size == 0:
                             continue
-                        # For long positions: if in loss or break-even, force-close.
+                        # For long positions: force close if in loss.
                         if size > 0:
                             profit_pct = (live_price - entry) / entry
-                            if profit_pct <= 0:
+                            if profit_pct < 0:
                                 close_order = self.trade_manager.place_market_order(
                                     "BTCUSD", "sell", size, params={"time_in_force": "ioc"}, force=True
                                 )
                                 logger.info("TP signal: Force closing long position in loss. Close order: %s", close_order)
-                        # For short positions: if in loss or break-even, force-close.
+                        # For short positions: force close if in loss.
                         elif size < 0:
                             profit_pct = (entry - live_price) / entry
-                            if profit_pct <= 0:
+                            if profit_pct < 0:
                                 close_order = self.trade_manager.place_market_order(
                                     "BTCUSD", "buy", abs(size), params={"time_in_force": "ioc"}, force=True
                                 )
@@ -149,7 +148,7 @@ class SignalProcessor:
                 logger.error("Error processing TP signal: %s", e)
             return None
 
-        # Determine the new order side.
+        # Determine new order side based on signal text.
         if "short" in signal_text:
             new_side = "sell"
         elif "buy" in signal_text:
@@ -157,7 +156,6 @@ class SignalProcessor:
         else:
             new_side = None
 
-        # Handle opposite positions: force-close existing positions if necessary.
         try:
             positions = self.order_manager.client.fetch_positions()
             for pos in positions:
@@ -182,12 +180,11 @@ class SignalProcessor:
         except Exception as e:
             logger.error("Error handling opposite positions: %s", e)
 
-        # Cancel conflicting orders.
+        # Cancel conflicting and same-side orders.
         self.cancel_conflicting_orders("BTCUSD", new_side)
         self.cancel_same_side_orders("BTCUSD", new_side)
         time.sleep(2)
 
-        # Check if an open position on the same side already exists.
         if self.order_manager.has_open_position("BTCUSD", new_side):
             logger.info("An open %s position exists for BTCUSD. Skipping new order placement.", new_side)
             return None
@@ -196,7 +193,6 @@ class SignalProcessor:
             logger.error("Incomplete signal data (supply/demand missing): %s", signal_data)
             return None
 
-        # Compute order parameters based on configurable offsets.
         if new_side == "buy":
             entry_price = float(raw_price) - (float(raw_price) * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
             sl_price = float(raw_price) - (float(raw_price) * (config.ORDER_SL_OFFSET_PERCENT / 100))
@@ -266,7 +262,6 @@ class SignalProcessor:
             time.sleep(sleep_interval)
 
 if __name__ == "__main__":
-    # For proper operation, instantiate SignalProcessor with a shared websocket instance.
-    # Here, passing None for testing; in production, inject the shared ws instance and optionally a ProfitTrailing instance.
+    # For testing, you may create a dummy websocket instance.
     sp = SignalProcessor(None)
     sp.process_signals_loop()
