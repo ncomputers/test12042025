@@ -7,7 +7,12 @@ import redis
 import json
 from difflib import SequenceMatcher
 import threading
-import torch  # Needed to check and call flatten_parameters()
+import torch  # Needed for checking and flattening RNN parameters
+import warnings
+import sys
+
+# Suppress PyTorch RNN contiguous memory warning
+warnings.filterwarnings("ignore", message="RNN module weights are not part of single contiguous chunk")
 
 # Redis connection
 r = redis.Redis(host='localhost', port=6379, db=0)
@@ -21,9 +26,8 @@ reader = easyocr.Reader(['en'])
 
 def flatten_rnn(ocr_reader):
     """
-    If the provided EasyOCR reader has a 'model' attribute, iterate over its submodules
+    If the provided EasyOCR reader has a 'model' attribute, iterate through its submodules
     and call flatten_parameters() on any RNN, LSTM, or GRU modules.
-    If no 'model' attribute exists, simply do nothing.
     """
     if not hasattr(ocr_reader, "model"):
         return
@@ -63,25 +67,25 @@ def parse_trading_signal(text):
     Otherwise returns None.
     """
     lower_text = text.lower()
-    
+
     # Check for take profit keywords first.
     tp_keywords = ["take profit", "take", "tp"]
     for key in tp_keywords:
         if key in lower_text:
             return "Take Profit"
-    
+
     # Check for buy-related keywords.
     buy_keywords = ["buy signal", "long signal", "long singal", "buy/long", "buy", "long"]
     for key in buy_keywords:
         if key in lower_text:
             return "Buy Signal"
-    
+
     # Check for short-related keywords.
     short_keywords = ["sell/short", "sell signal", "short signal", "short singal", "sell", "short"]
     for key in short_keywords:
         if key in lower_text:
             return "Short Signal"
-    
+
     return None
 
 def fuzzy_match(text, keyword, threshold=0.7):
@@ -93,22 +97,22 @@ DEMAND_ZONE_KEYWORDS = ["demand zone", "dem zone", "d zone", "dem zo", "dmd zone
 def stream_worker(url, symbol):
     """
     Processes a YouTube stream to extract trading signals.
-    Each time a trading signal is detected, the OCR output is converted to one of three fixed texts:
-    "Buy Signal", "Take Profit", or "Short Signal". An aggregated JSON record is built in a fixed format.
+    The OCR output is mapped to one of three fixed strings ("Buy Signal", "Take Profit", or "Short Signal"),
+    and an aggregated JSON record is built in a fixed format.
     Before updating Redis, the code fetches the last stored record for that symbol and only appends
     the new record if the fixed signal text has changed.
     """
     prev_aggregated = None
     first_signal_set = False
     last_known_signal = {"text": "", "price": "", "coordinates": ""}
-    
+
     while True:
         try:
             stream = YouTubeStream(url)
             stream.connect()
             print(f"Connected to stream for {symbol}.")
             retry_count = 0
-            
+
             while True:
                 ret, frame = stream.read_frame()
                 if not ret or frame is None:
@@ -120,27 +124,27 @@ def stream_worker(url, symbol):
                     continue
                 else:
                     retry_count = 0
-                
+
                 # Crop the rightmost 25% of the frame.
                 height, width = frame.shape[:2]
                 roi_start = int(width * 0.75)
                 roi = frame[:, roi_start:width]
-                
+
                 # Convert ROI to grayscale.
                 gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                
-                # Optimize PyTorch memory usage for OCR by flattening parameters if possible.
+
+                # Flatten RNN parameters if available (to reduce memory usage warning).
                 flatten_rnn(reader)
-                
+
                 # Run OCR on the cropped region.
                 results = reader.readtext(gray_roi)
-                
+
                 all_signals = []
                 for (bbox, text, prob) in results:
                     (tl, _, br, _) = bbox
                     tl = (int(tl[0] + roi_start), int(tl[1]))
                     lower_text = text.lower().strip()
-                    
+
                     fixed_text = parse_trading_signal(lower_text)
                     if fixed_text:
                         all_signals.append((tl[0], tl[1], fixed_text))
@@ -148,7 +152,7 @@ def stream_worker(url, symbol):
                         pass  # Supply zone detection disabled.
                     elif any(fuzzy_match(lower_text, kw) for kw in DEMAND_ZONE_KEYWORDS):
                         pass  # Demand zone detection disabled.
-                
+
                 last_signal_data = {"text": "", "price": "", "coordinates": ""}
                 if not first_signal_set and all_signals:
                     all_signals.sort(key=lambda s: s[0], reverse=True)
@@ -159,13 +163,14 @@ def stream_worker(url, symbol):
                     all_signals.sort(key=lambda s: s[0], reverse=True)
                     _, _, fixed_signal = all_signals[0]
                     last_signal_data = {"text": fixed_signal, "price": "", "coordinates": ""}
-                
+
                 if last_signal_data.get("text"):
                     last_known_signal = last_signal_data
-                
+
+                # Supply/demand zone placeholders.
                 supply_zone_data = {"min": "", "max": ""}
                 demand_zone_data = {"min": "", "max": ""}
-                
+
                 aggregated = {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "symbol": symbol,
@@ -177,8 +182,8 @@ def stream_worker(url, symbol):
                     "supply_zone": supply_zone_data,
                     "demand_zone": demand_zone_data
                 }
-                
-                # Fetch the last stored signal for this symbol from Redis.
+
+                # Fetch the last stored signal from Redis for this symbol.
                 try:
                     last_data = r.lindex(f"{symbol}_signal", -1)
                     if last_data is not None:
@@ -193,7 +198,7 @@ def stream_worker(url, symbol):
                 except Exception as e:
                     print(f"Redis read error for {symbol}: {e}")
                     last_text = ""
-                
+
                 # Only update Redis if the fixed signal text has changed.
                 if aggregated["last_signal"]["text"] != last_text:
                     try:
@@ -202,12 +207,12 @@ def stream_worker(url, symbol):
                         prev_aggregated = aggregated
                     except Exception as e:
                         print(f"Redis update error for {symbol}: {e}")
-                
+
                 time.sleep(10)
-            
+
             stream.release()
             time.sleep(5)
-        
+
         except Exception as e:
             print(f"Exception in main loop for {symbol}: {e}")
             time.sleep(5)
@@ -223,4 +228,8 @@ def run_streams():
     eth_thread.join()
 
 if __name__ == "__main__":
-    run_streams()
+    try:
+        run_streams()
+    except KeyboardInterrupt:
+        print("\nReceived Keyboard Interrupt. Exiting gracefully.")
+        sys.exit(0)
