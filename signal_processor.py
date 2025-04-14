@@ -29,15 +29,20 @@ class SignalProcessor:
         self.last_signal: Optional[Dict[str, Any]] = None
         self.last_executed_side: Optional[str] = None
 
-    def fetch_signal(self, key: str = "signal") -> Optional[Dict[str, Any]]:
+    def fetch_signal(self, key: str = "BTCUSDT_signal") -> Optional[Dict[str, Any]]:
         try:
-            data = self.redis_client.get(key)
+            # Use lindex to retrieve the last element from the list
+            data = self.redis_client.lindex(key, -1)
             if not data:
                 return None
+            # If data is bytes, decode it (assuming UTF-8 encoding)
+            if isinstance(data, bytes):
+                data = data.decode("utf-8")
             return json.loads(data)
         except Exception as e:
             logger.error("Error fetching signal from Redis: %s", e)
             return None
+
 
     def cancel_conflicting_orders(self, symbol: str, new_side: str) -> None:
         try:
@@ -105,7 +110,7 @@ class SignalProcessor:
         # Process take profit signals.
         if "take profit" in signal_text or "tp" in signal_text:
             logger.info("Take profit signal detected.")
-            # IMPORTANT: Update the flag on the shared ProfitTrailing instance.
+            # Set the flag on the shared ProfitTrailing instance
             if self.profit_trailing:
                 self.profit_trailing.take_profit_detected = True
             live_price = self.ws.current_price
@@ -128,7 +133,7 @@ class SignalProcessor:
                             size = 0.0
                         if size == 0:
                             continue
-                        # For long positions: force close if in loss.
+                        # For long positions: if in loss, force close using a market sell order.
                         if size > 0:
                             profit_pct = (live_price - entry) / entry
                             if profit_pct < 0:
@@ -136,7 +141,9 @@ class SignalProcessor:
                                     "BTCUSD", "sell", size, params={"time_in_force": "ioc"}, force=True
                                 )
                                 logger.info("TP signal: Force closing long position in loss. Close order: %s", close_order)
-                        # For short positions: force close if in loss.
+                                # After closing, skip further processing for this TP signal.
+                                continue
+                        # For short positions: if in loss, force close using a market buy order.
                         elif size < 0:
                             profit_pct = (entry - live_price) / entry
                             if profit_pct < 0:
@@ -144,9 +151,12 @@ class SignalProcessor:
                                     "BTCUSD", "buy", abs(size), params={"time_in_force": "ioc"}, force=True
                                 )
                                 logger.info("TP signal: Force closing short position in loss. Close order: %s", close_order)
+                                continue
             except Exception as e:
                 logger.error("Error processing TP signal: %s", e)
+            # Return immediately to skip new order placement after a TP signal.
             return None
+
 
         # Determine new order side based on signal text.
         if "short" in signal_text:
