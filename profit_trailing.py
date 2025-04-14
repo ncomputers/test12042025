@@ -1,6 +1,5 @@
 import time
 import logging
-import threading
 import json
 from typing import Dict, Any, List, Optional, Tuple
 from exchange import DeltaExchangeClient
@@ -19,12 +18,13 @@ class ProfitTrailing:
         self.client = DeltaExchangeClient()
         self.trade_manager = TradeManager()
         self.check_interval: int = check_interval
-        self.position_trailing_stop: Dict[Any, float] = {}   # order_id -> trailing stop price
+        self.position_trailing_stop: Dict[Any, float] = {}   # key -> trailing stop price
         self.last_had_positions: bool = True
         self.last_position_fetch_time: float = 0.0
         self.position_fetch_interval: int = 5  # seconds between position fetches
         self.cached_positions: List[Dict[str, Any]] = []
         self.last_display: Dict[Any, Dict[str, Any]] = {}
+        # Store the maximum profit in absolute terms for each position key.
         self.position_max_profit: Dict[Any, float] = {}
         self.take_profit_detected: bool = False  # Flag to indicate if a TP signal has been detected
 
@@ -64,62 +64,52 @@ class ProfitTrailing:
     def update_trailing_stop(self, pos: Dict[str, Any], live_price: float) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """
         Updates the trailing stop for a given position.
-
-        - Tries to get a valid order identifier from 'id' or 'orderId'.
-        - If no identifier exists, it generates one by computing a hash of the JSON string of the position data (with keys sorted).
-        - Calculates the current profit (in absolute points) and updates the maximum profit.
-        - If the take profit signal is detected and current profit is positive, applies the "lock_50" rule.
-        - Else if maximum profit exceeds 1000 points and profit is positive, sets the stop loss at the entry (break-even).
-        - Otherwise, uses a default fixed offset (expressed as a percentage of the entry) from the config.
-
+        
+        A stable key for the position is generated using product symbol, entry price, and size.
+        Current profit is calculated as the difference between live price and entry, and maximum profit
+        is updated if the current profit exceeds the previous maximum.
+        
+        If a take profit signal is detected (self.take_profit_detected is True) and the position
+        is profitable (current profit >= 0), then a trailing stop is set to lock in half of the maximum profit.
+        Otherwise, a default fixed offset (from config) is used.
+        
         Returns a tuple: (new_trailing_stop, profit_ratio, rule)
         """
-        # Obtain order ID; if not present, generate one from a JSON string of the position.
-        order_id = pos.get('id') or pos.get('orderId')
-        if not order_id:
-            order_id = str(hash(json.dumps(pos, sort_keys=True)))
-
-        entry = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
+        pos_symbol = pos.get("info", {}).get("product_symbol") or pos.get("symbol", "unknown")
+        entry_val = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
+        size_val = pos.get('size') or pos.get('contracts')
+        key = f"{pos_symbol}_{entry_val}_{size_val}"
+        
         try:
-            entry = float(entry)
+            entry = float(entry_val)
         except Exception:
             return None, None, None
         try:
-            size = float(pos.get('size') or pos.get('contracts') or 0)
+            size = float(size_val or 0)
         except Exception:
             size = 0.0
+        if size == 0:
+            return None, None, None
 
-        # Calculate current profit in absolute points.
+        # Calculate current profit in absolute terms.
         current_profit = live_price - entry if size > 0 else entry - live_price
 
-        # Update maximum profit achieved for this order.
-        prev_max = self.position_max_profit.get(order_id, 0)
+        # Update maximum profit recorded for this position.
+        prev_max = self.position_max_profit.get(key, 0)
         new_max_profit = max(prev_max, current_profit)
-        self.position_max_profit[order_id] = new_max_profit
+        self.position_max_profit[key] = new_max_profit
 
-        # If take profit is detected and current profit is positive, apply lock_50 rule.
-        if self.take_profit_detected and current_profit > 0:
-            new_trailing = entry + new_max_profit / 2 if size > 0 else entry - new_max_profit / 2
+        # If a take profit signal is active and the position is profitable, use profit-locking.
+        if self.take_profit_detected and current_profit >= 0:
+            new_trailing = entry + (new_max_profit / 2) if size > 0 else entry - (new_max_profit / 2)
             rule = "lock_50"
-            self.position_trailing_stop[order_id] = new_trailing
-            return new_trailing, new_max_profit / entry, rule
-        # Otherwise, if profit exceeds 1000 points and current profit is positive, switch to break-even.
-        elif new_max_profit > 1000 and current_profit > 0:
-            new_trailing = entry
-            rule = "break_even"
-            self.position_trailing_stop[order_id] = new_trailing
-            return new_trailing, new_max_profit / entry, rule
         else:
-            # Use fixed offset defined in config (as percentage, if desired).
+            # Default to fixed offset defined in config.
             default_offset = entry * (config.FIXED_STOP_OFFSET_PERCENT / 100)
-            default_sl = entry - default_offset if size > 0 else entry + default_offset
-            stored_trailing = self.position_trailing_stop.get(order_id)
-            if stored_trailing is not None:
-                new_trailing = max(stored_trailing, default_sl) if size > 0 else min(stored_trailing, default_sl)
-            else:
-                new_trailing = default_sl
-            self.position_trailing_stop[order_id] = new_trailing
-            return new_trailing, current_profit / entry, "fixed_stop"
+            new_trailing = entry - default_offset if size > 0 else entry + default_offset
+            rule = "fixed_stop"
+        self.position_trailing_stop[key] = new_trailing
+        return new_trailing, new_max_profit / entry, rule
 
     def compute_raw_profit(self, pos: Dict[str, Any], live_price: float) -> Optional[float]:
         entry = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
@@ -134,7 +124,12 @@ class ProfitTrailing:
         return (live_price - entry) * size if size > 0 else (entry - live_price) * abs(size)
 
     def book_profit(self, pos: Dict[str, Any], live_price: float) -> bool:
-        order_id = pos.get('id') or pos.get('orderId') or "unknown"
+        # Generate the same key as in update_trailing_stop.
+        pos_symbol = pos.get("info", {}).get("product_symbol") or pos.get("symbol", "unknown")
+        entry_val = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
+        size_val = pos.get('size') or pos.get('contracts')
+        key = f"{pos_symbol}_{entry_val}_{size_val}"
+        
         try:
             size = float(pos.get('size') or pos.get('contracts') or 0)
         except Exception:
@@ -144,16 +139,29 @@ class ProfitTrailing:
         if trailing_stop is None:
             return False
 
-        if rule in ["lock_50", "fixed_stop", "break_even"]:
+        # If the price breaches the trailing stop, trigger a market close.
+        if rule == "lock_50":  # Under TP signal profit-lock rule
             if size > 0 and live_price < trailing_stop:
                 close_order = self.trade_manager.place_market_order("BTCUSD", "sell", size,
                                                                       params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for long order %s. Closing position: %s", order_id, close_order)
+                logger.info("Trailing stop triggered for long position %s. Closing position: %s", key, close_order)
                 return True
             elif size < 0 and live_price > trailing_stop:
                 close_order = self.trade_manager.place_market_order("BTCUSD", "buy", abs(size),
                                                                       params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for short order %s. Closing position: %s", order_id, close_order)
+                logger.info("Trailing stop triggered for short position %s. Closing position: %s", key, close_order)
+                return True
+        else:
+            # Under fixed_stop mode, the close condition remains the same.
+            if size > 0 and live_price < trailing_stop:
+                close_order = self.trade_manager.place_market_order("BTCUSD", "sell", size,
+                                                                      params={"time_in_force": "ioc"}, force=True)
+                logger.info("Trailing stop triggered for long position %s. Closing position: %s", key, close_order)
+                return True
+            elif size < 0 and live_price > trailing_stop:
+                close_order = self.trade_manager.place_market_order("BTCUSD", "buy", abs(size),
+                                                                      params={"time_in_force": "ioc"}, force=True)
+                logger.info("Trailing stop triggered for short position %s. Closing position: %s", key, close_order)
                 return True
         return False
 
@@ -198,8 +206,11 @@ class ProfitTrailing:
                     self.last_had_positions = True
 
                 for pos in self.cached_positions:
-                    # Attempt to extract order id using multiple keys.
-                    order_id = pos.get('id') or pos.get('orderId') or "unknown"
+                    pos_symbol = pos.get("info", {}).get("product_symbol") or pos.get("symbol", "unknown")
+                    entry_val = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
+                    size_val = pos.get('size') or pos.get('contracts')
+                    key = f"{pos_symbol}_{entry_val}_{size_val}"
+
                     try:
                         size = float(pos.get('size') or pos.get('contracts') or 0)
                     except Exception:
@@ -208,21 +219,20 @@ class ProfitTrailing:
                         continue
 
                     try:
-                        entry_val = float(pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price', 0))
+                        entry_num = float(entry_val)
                     except Exception:
-                        entry_val = None
+                        entry_num = None
 
                     profit_pct = self.compute_profit_pct(pos, live_price)
                     profit_display = profit_pct * 100 if profit_pct is not None else 0
                     raw_profit = self.compute_raw_profit(pos, live_price)
                     profit_usd = raw_profit / 1000 if raw_profit is not None else 0
-                    trailing_stop, _, rule = self.update_trailing_stop(pos, live_price)
-
+                    trailing_stop, ratio, rule = self.update_trailing_stop(pos, live_price)
                     side = "long" if size > 0 else "short"
-                    max_profit = self.position_max_profit.get(order_id, 0)
+                    max_profit = self.position_max_profit.get(key, 0)
 
                     display = {
-                        "entry": entry_val,
+                        "entry": entry_num,
                         "live": live_price,
                         "profit": round(profit_display or 0, 2),
                         "usd": round(profit_usd or 0, 2),
@@ -233,15 +243,15 @@ class ProfitTrailing:
                         "max_profit": round(max_profit, 1)
                     }
 
-                    if self.last_display.get(order_id) != display:
+                    if self.last_display.get(key) != display:
                         logger.info(
-                            f"Order: {order_id} | Size: {size:.0f} ({side}) | Entry: {entry_val:.1f} | Live: {live_price:.1f} | "
+                            f"Order: {key} | Size: {size:.0f} ({side}) | Entry: {entry_num:.1f} | Live: {live_price:.1f} | "
                             f"PnL: {profit_display:.2f}% | USD: {profit_usd:.2f} | Max Profit: {max_profit:.1f} | Rule: {rule} | SL: {trailing_stop:.1f}"
                         )
-                        self.last_display[order_id] = display
+                        self.last_display[key] = display
 
                     if self.book_profit(pos, live_price):
-                        logger.info("Profit booked for order %s.", order_id)
+                        logger.info("Profit booked for order %s.", key)
 
             time.sleep(self.check_interval)
 
@@ -250,7 +260,6 @@ if __name__ == '__main__':
     class DummyWS:
         current_price = 83000.0
 
-    # Replace DummyWS with your actual shared websocket instance.
     dummy_ws = DummyWS()
     pt = ProfitTrailing(dummy_ws, check_interval=1)
     pt.track()
