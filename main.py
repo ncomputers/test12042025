@@ -6,23 +6,26 @@ from signal_processor import SignalProcessor
 from binance_ws import BinanceWebsocket
 
 def main() -> None:
+    # Set up centralized logging
     setup_logging()
     logger = logging.getLogger(__name__)
     logger.info("Starting main application with shared websocket instance.")
 
-    # Create a single shared BinanceWebsocket instance and start it.
+    # Create and start a shared BinanceWebsocket instance
     ws_instance = BinanceWebsocket()
     ws_instance.start()
 
-    # Inject the shared websocket into the ProfitTrailing and SignalProcessor modules.
+    # Create the ProfitTrailing instance for trailing stop management
     pt_tracker = ProfitTrailing(ws_instance, check_interval=1)
-    sp = SignalProcessor(ws_instance)
+    
+    # Create the SignalProcessor, injecting both the shared websocket and the ProfitTrailing instance
+    sp = SignalProcessor(ws_instance, profit_trailing=pt_tracker)
 
-    # Start profit trailing in a daemon thread.
+    # Start the profit trailing tracking in its own (daemon) thread
     pt_thread = threading.Thread(target=pt_tracker.track, daemon=True)
     pt_thread.start()
 
-    # Run signal processor loop in the main thread.
+    # Run the signal processor loop (this will keep running in the main thread)
     sp.process_signals_loop(sleep_interval=5)
 
 if __name__ == '__main__':
