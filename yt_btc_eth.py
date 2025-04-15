@@ -17,10 +17,9 @@ warnings.filterwarnings("ignore", message="RNN module weights are not part of si
 # Redis connection
 r = redis.Redis(host='localhost', port=6379, db=0)
 
-# YouTube URLs for BTC, ETH, and SOLANA streams
+# YouTube URLs for BTC and ETH
 BTC_URL = "https://www.youtube.com/live/jkP1Sw7M2iU"
 ETH_URL = "https://www.youtube.com/live/9M93_6S9TaQ"
-SOL_URL = "https://www.youtube.com/live/mtmVRj--3lk"
 
 # OCR reader
 reader = easyocr.Reader(['en'])
@@ -70,7 +69,7 @@ def parse_trading_signal(text):
     lower_text = text.lower()
 
     # Check for take profit keywords first.
-    tp_keywords = ["take profit", "take", "tp"]
+    tp_keywords = ["take profit", "take", "tp", "TP"]
     for key in tp_keywords:
         if key in lower_text:
             return "Take Profit"
@@ -223,13 +222,10 @@ def stream_worker(url, symbol):
 def run_streams():
     btc_thread = threading.Thread(target=stream_worker, args=(BTC_URL, "BTCUSDT"), name="YouTubeOCR_BTC", daemon=True)
     eth_thread = threading.Thread(target=stream_worker, args=(ETH_URL, "ETHUSDT"), name="YouTubeOCR_ETH", daemon=True)
-    sol_thread = threading.Thread(target=stream_worker, args=(SOL_URL, "SOLUSDT"), name="YouTubeOCR_SOL", daemon=True)
     btc_thread.start()
     eth_thread.start()
-    sol_thread.start()
     btc_thread.join()
     eth_thread.join()
-    sol_thread.join()
 
 if __name__ == "__main__":
     try:
