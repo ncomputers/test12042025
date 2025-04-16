@@ -85,28 +85,9 @@ class TradeManager:
             time.sleep(update_interval)
 
     def place_market_order(self, symbol: str, side: str, amount: float, params: Optional[Dict[str, Any]] = None, force: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        Place a market order for the specified symbol and side.
-        
-        The method performs several checks unless forced:
-          1. No open positions exist for the side.
-          2. No pending orders exist for the side (both via the API and local cache).
-        
-        Args:
-            symbol (str): Trading symbol (e.g., "BTCUSD").
-            side (str): Order side ("buy" or "sell").
-            amount (float): Quantity to trade.
-            params (Optional[Dict[str, Any]], optional): Additional order parameters.
-            force (bool, optional): If True, bypasses all conflict checks to ensure immediate order placement.
-        
-        Returns:
-            Optional[Dict[str, Any]]: The order information if successfully placed; otherwise, None.
-        
-        Raises:
-            Exception: If order placement fails.
-        """
         side_lower = side.lower()
 
+        # If not forced, run the safety checks
         if not force:
             # 1. Check for existing open positions.
             try:
@@ -152,6 +133,13 @@ class TradeManager:
                 if order.get("side", "").lower() == side_lower and order.get("status") in ["open", "pending"]:
                     logger.info("Local pending %s order exists for %s. Skipping new order.", side, symbol)
                     return None
+
+        # If force is True (used in trailing stop closure), add reduce_only flag.
+        if force:
+            if params is None:
+                params = {}
+            # Ensure reduce_only is True to prevent the order from flipping your position.
+            params.setdefault("reduce_only", True)
 
         try:
             order = self.client.exchange.create_order(symbol, "market", side, amount, None, params or {})
