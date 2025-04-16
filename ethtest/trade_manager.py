@@ -24,7 +24,7 @@ class TradeManager:
         Retrieve the current price for the given product using the exchange ticker.
         
         Args:
-            product_symbol (str): The trading symbol (e.g., "ETHUSD").
+            product_symbol (str): The trading symbol (e.g., "BTCUSD").
         
         Returns:
             float: The latest price.
@@ -46,7 +46,7 @@ class TradeManager:
         
         Args:
             bracket_order_id (Any): Identifier for the bracket order to modify.
-            product_symbol (str): The product symbol to monitor (e.g., "ETHUSD").
+            product_symbol (str): The product symbol to monitor (e.g., "BTCUSD").
             trailing_stop_percent (float): The percentage used to calculate the new stop loss.
             update_interval (int, optional): Interval (in seconds) between updates.
         """
@@ -177,12 +177,12 @@ class TradeManager:
             logger.error("Error placing market order for %s: %s", symbol, e)
             raise
 
-
 if __name__ == "__main__":
     tm = TradeManager()
     logger.info("Testing market order placement...")
     try:
-        market_order = tm.place_market_order("ETHUSD", "buy", 1, params={"time_in_force": "ioc"})
+        market_order = tm.place_market_order("BTCUSD", "buy", 1, params={"time_in_force": "ioc"})
         logger.info("Market order placed: %s", market_order)
     except Exception as e:
         logger.error("Failed to place market order: %s", e)
+#
