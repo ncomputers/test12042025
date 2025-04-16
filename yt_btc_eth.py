@@ -69,7 +69,7 @@ def parse_trading_signal(text):
     lower_text = text.lower()
 
     # Check for take profit keywords first.
-    tp_keywords = ["take profit", "take", "tp", "TP"]
+    tp_keywords = ["take profit", "take", "tp"]
     for key in tp_keywords:
         if key in lower_text:
             return "Take Profit"
@@ -199,14 +199,20 @@ def stream_worker(url, symbol):
                     print(f"Redis read error for {symbol}: {e}")
                     last_text = ""
 
-                # Only update Redis if the fixed signal text has changed.
-                if aggregated["last_signal"]["text"] != last_text:
-                    try:
-                        r.rpush(f"{symbol}_signal", json.dumps(aggregated))
-                        print(f"Updated Redis for {symbol}:", aggregated)
-                        prev_aggregated = aggregated
-                    except Exception as e:
-                        print(f"Redis update error for {symbol}: {e}")
+                # Only update Redis if there is a valid trading signal and the fixed signal text has changed.
+                if aggregated["last_signal"]["text"]:
+                    if aggregated["last_signal"]["text"] != last_text:
+                        try:
+                            r.rpush(f"{symbol}_signal", json.dumps(aggregated))
+                            print(f"Updated Redis for {symbol}:", aggregated)
+                            prev_aggregated = aggregated
+                        except Exception as e:
+                            print(f"Redis update error for {symbol}: {e}")
+                    else:
+                        print(f"Signal for {symbol} unchanged, skipping update.")
+                else:
+                    print(f"No valid trading signal detected for {symbol}, skipping Redis update.")
+
 
                 time.sleep(10)
 
