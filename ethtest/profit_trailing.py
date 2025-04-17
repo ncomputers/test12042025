@@ -101,7 +101,7 @@ class ProfitTrailing:
         self.position_max_profit[key] = new_max_profit
 
         # If a take profit signal is active and the position is profitable, use profit-locking.
-        if self.take_profit_detected and current_profit >= 30:
+        if self.take_profit_detected and new_max_profit >= 30:
             new_trailing = entry + (new_max_profit / 2) if size > 0 else entry - (new_max_profit / 2)
             rule = "lock_50"
         else:
@@ -228,7 +228,6 @@ class ProfitTrailing:
                     profit_display = profit_pct * 100 if profit_pct is not None else 0
                     raw_profit = self.compute_raw_profit(pos, live_price)
                     profit_usd = raw_profit / 100 if raw_profit is not None else 0
-                    #123
                     trailing_stop, ratio, rule = self.update_trailing_stop(pos, live_price)
                     side = "long" if size > 0 else "short"
                     max_profit = self.position_max_profit.get(key, 0)
