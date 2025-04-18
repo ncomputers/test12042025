@@ -64,16 +64,6 @@ class ProfitTrailing:
     def update_trailing_stop(self, pos: Dict[str, Any], live_price: float) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """
         Updates the trailing stop for a given position.
-        
-        A stable key for the position is generated using product symbol, entry price, and size.
-        Current profit is calculated as the difference between live price and entry, and maximum profit
-        is updated if the current profit exceeds the previous maximum.
-        
-        If a take profit signal is detected (self.take_profit_detected is True) and the position
-        is profitable (current profit >= 0), then a trailing stop is set to lock in half of the maximum profit.
-        Otherwise, a default fixed offset (from config) is used.
-        
-        Returns a tuple: (new_trailing_stop, profit_ratio, rule)
         """
         pos_symbol = pos.get("info", {}).get("product_symbol") or pos.get("symbol", "unknown")
         entry_val = pos.get('entryPrice') or pos.get('entry_price') or pos.get('info', {}).get('entry_price')
@@ -99,7 +89,7 @@ class ProfitTrailing:
         new_max_profit = max(prev_max, current_profit)
         self.position_max_profit[key] = new_max_profit
 
-        # If a take profit signal is active and the position is profitable, use profit-locking.
+        # If a take profit signal is active and profit exceeds threshold, use profit-locking.
         if self.take_profit_detected and new_max_profit >= 400:
             new_trailing = entry + (new_max_profit / 2) if size > 0 else entry - (new_max_profit / 2)
             rule = "lock_50"
@@ -140,29 +130,52 @@ class ProfitTrailing:
             return False
 
         # If the price breaches the trailing stop, trigger a market close.
-        if rule == "lock_50":  # Under TP signal profit-lock rule
+        if rule == "lock_50":
             if size > 0 and live_price < trailing_stop:
-                close_order = self.trade_manager.place_market_order("BTCUSD", "sell", size,
-                                                                      params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for long position %s. Closing position: %s", key, close_order)
-                return True
+                try:
+                    close_order = self.trade_manager.place_market_order(
+                        "BTCUSD", "sell", size,
+                        params={"time_in_force": "ioc"}, force=True
+                    )
+                    logger.info("Trailing stop triggered for %s. Closed: %s", key, close_order)
+                    return True
+                except Exception as e:
+                    logger.error("Failed to close %s on trailing stop: %s", key, e)
+                    return False
             elif size < 0 and live_price > trailing_stop:
-                close_order = self.trade_manager.place_market_order("BTCUSD", "buy", abs(size),
-                                                                      params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for short position %s. Closing position: %s", key, close_order)
-                return True
+                try:
+                    close_order = self.trade_manager.place_market_order(
+                        "BTCUSD", "buy", abs(size),
+                        params={"time_in_force": "ioc"}, force=True
+                    )
+                    logger.info("Trailing stop triggered for %s. Closed: %s", key, close_order)
+                    return True
+                except Exception as e:
+                    logger.error("Failed to close %s on trailing stop: %s", key, e)
+                    return False
         else:
-            # Under fixed_stop mode, the close condition remains the same.
             if size > 0 and live_price < trailing_stop:
-                close_order = self.trade_manager.place_market_order("BTCUSD", "sell", size,
-                                                                      params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for long position %s. Closing position: %s", key, close_order)
-                return True
+                try:
+                    close_order = self.trade_manager.place_market_order(
+                        "BTCUSD", "sell", size,
+                        params={"time_in_force": "ioc"}, force=True
+                    )
+                    logger.info("Trailing stop triggered for %s. Closed: %s", key, close_order)
+                    return True
+                except Exception as e:
+                    logger.error("Failed to close %s on trailing stop: %s", key, e)
+                    return False
             elif size < 0 and live_price > trailing_stop:
-                close_order = self.trade_manager.place_market_order("BTCUSD", "buy", abs(size),
-                                                                      params={"time_in_force": "ioc"}, force=True)
-                logger.info("Trailing stop triggered for short position %s. Closing position: %s", key, close_order)
-                return True
+                try:
+                    close_order = self.trade_manager.place_market_order(
+                        "BTCUSD", "buy", abs(size),
+                        params={"time_in_force": "ioc"}, force=True
+                    )
+                    logger.info("Trailing stop triggered for %s. Closed: %s", key, close_order)
+                    return True
+                except Exception as e:
+                    logger.error("Failed to close %s on trailing stop: %s", key, e)
+                    return False
         return False
 
     def track(self) -> None:
@@ -250,8 +263,12 @@ class ProfitTrailing:
                         )
                         self.last_display[key] = display
 
-                    if self.book_profit(pos, live_price):
-                        logger.info("Profit booked for order %s.", key)
+                    # Wrapped book_profit in try/except to prevent thread crash
+                    try:
+                        if self.book_profit(pos, live_price):
+                            logger.info("Profit booked for order %s.", key)
+                    except Exception as e:
+                        logger.error("Error booking profit for %s: %s", key, e)
 
             time.sleep(self.check_interval)
 
