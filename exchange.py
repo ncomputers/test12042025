@@ -143,21 +143,26 @@ class DeltaExchangeClient:
 
     def fetch_positions(self):
         """
-        Fetches the current open positions from the exchange.
-        Uses fetch_positions if available; otherwise, makes a direct GET request.
+        Fetch all open positions. First, try the CCXT helper; if it fails on
+        /positions/margined, fall back to a plain GET /positions.
         """
         try:
-            if hasattr(self.exchange, 'fetch_positions'):
-                positions = self.exchange.fetch_positions()
-                logger.debug("Positions fetched using fetch_positions: %s", positions)
-                return positions
-            else:
+            positions = self.exchange.fetch_positions()
+            logger.debug("Positions fetched via CCXT.fetch_positions(): %s", positions)
+            return positions
+        except Exception as ccxt_err:
+            logger.warning(
+                "CCXT.fetch_positions() failed (%s), falling back to direct GET /positions.",
+                ccxt_err
+            )
+            try:
                 positions = self.exchange.request('positions', 'GET', {})
-                logger.debug("Positions fetched using direct request: %s", positions)
+                logger.debug("Positions fetched via direct request: %s", positions)
                 return positions
-        except Exception as e:
-            logger.error("Error fetching positions: %s", e)
-            raise
+            except Exception as api_err:
+                logger.error("Direct request to /positions also failed: %s", api_err)
+                raise
+
 
 if __name__ == '__main__':
     # Testing each account.
