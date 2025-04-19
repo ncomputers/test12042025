@@ -90,7 +90,7 @@ class ProfitTrailing:
         self.position_max_profit[key] = new_max_profit
 
         # If a take profit signal is active and profit exceeds threshold, use profit-locking.
-        if self.take_profit_detected and new_max_profit >= 400:
+        if self.take_profit_detected and new_max_profit >= 350:
             new_trailing = entry + (new_max_profit / 2) if size > 0 else entry - (new_max_profit / 2)
             rule = "lock_50"
         else:
