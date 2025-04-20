@@ -47,16 +47,23 @@ class BinanceWebsocket:
         self.logger.debug("Sent subscription message: %s", subscribe_message)
 
     def _start_socket(self):
-        self.ws_app = websocket.WebSocketApp(
-            self.stream_url,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
-        self.ws_app.on_open = self._on_open
-        self.logger.info("Starting WebSocket connection to %s", self.stream_url)
-        self.ws_app.run_forever()
-        self.logger.info("WebSocket run_forever loop exited")
+        while not self._stop_event.is_set():
+            try:
+                self.ws_app = websocket.WebSocketApp(
+                    self.stream_url,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close
+                )
+                self.ws_app.on_open = self._on_open
+                self.logger.info("Starting WebSocket connection to %s", self.stream_url)
+                self.ws_app.run_forever()
+            except Exception as e:
+                self.logger.error("WebSocket loop crashed: %s", e)
+            # wait a bit before reconnecting
+            time.sleep(self.reconnect_interval)
+        self.logger.info("Exiting WebSocket loop")
+
 
     def start(self):
         """
