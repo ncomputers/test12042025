@@ -207,7 +207,17 @@ class ProfitTrailing:
 
             if self.cached_positions and not self.last_had_positions:
                 logger.info("Open positions detected. Profit trailing resumed.")
+                # seed max‐profit with current profit on restart
+                live_price = self.ws.current_price or 0
+                for pos in self.cached_positions:
+                    entry = float(pos.get('info', {}).get('entry_price') or pos.get('entryPrice') or 0)
+                    size  = float(pos.get('size') or pos.get('contracts') or 0)
+                    key   = f"{pos.get('info', {}).get('product_symbol')}_{entry}_{size}"
+                    # compute raw profit (absolute P&L) or profit difference
+                    current_profit = (entry - live_price)*abs(size) if size < 0 else (live_price - entry)*size
+                    self.position_max_profit[key] = max(self.position_max_profit.get(key, 0), current_profit)
                 self.last_had_positions = True
+
 
             for pos in self.cached_positions:
                 entry_num = None
