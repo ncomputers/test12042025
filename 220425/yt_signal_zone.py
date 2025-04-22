@@ -58,10 +58,8 @@ def is_valid_btc_price(p):
 
 def get_closest_price(y_coord, price_list):
     if not price_list:
-        print(f"No price map found for Y={y_coord}")
         return ""
     closest = min(price_list, key=lambda p: abs(p[0] - y_coord))
-    print(f"Matched price for Y={y_coord} → {closest[1]}")
     return closest[1]
 
 def detect_zone_bounds(hsv_img, lower_hsv, upper_hsv):
@@ -100,7 +98,6 @@ def stream_worker(url, symbol):
         try:
             stream = YouTubeStream(url)
             stream.connect()
-            print(f"Connected to stream for {symbol}.")
             retry_count = 0
 
             while True:
@@ -108,27 +105,21 @@ def stream_worker(url, symbol):
                 if not ret or frame is None:
                     retry_count += 1
                     if retry_count >= 5:
-                        print(f"Stream error for {symbol}, reconnecting...")
                         break
                     time.sleep(5)
                     continue
                 retry_count = 0
 
                 h, w = frame.shape[:2]
-                x0 = int(w * 0.20)
+                x0 = int(w * 0.70)
                 roi = frame[:, x0:]
                 gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                 hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
                 flatten_rnn(reader)
 
                 ocr_results = reader.readtext(gray)
-                print("Full OCR:", [t[1] for t in ocr_results])
-
                 y_min_s, y_max_s = detect_zone_bounds(hsv, *SUPPLY_HSV)
                 y_min_d, y_max_d = detect_zone_bounds(hsv, *DEMAND_HSV)
-
-                print("SUPPLY_Y:", y_min_s, y_max_s)
-                print("DEMAND_Y:", y_min_d, y_max_d)
 
                 scale_bar_region = frame[:, int(w * 0.90):]
                 scale_gray = cv2.cvtColor(scale_bar_region, cv2.COLOR_BGR2GRAY)
@@ -144,15 +135,12 @@ def stream_worker(url, symbol):
                     if val and is_valid_btc_price(val):
                         price_map.append((y, val))
 
-                print("Parsed Price Map:", price_map)
-
                 supply_zone = {"min": "", "max": ""}
                 if y_min_s and y_max_s and price_map:
                     min_p = get_closest_price(y_max_s, price_map)
                     max_p = get_closest_price(y_min_s, price_map)
                     if min_p and max_p:
                         supply_zone = {"min": str(min_p), "max": str(max_p)}
-                    print("SUPPLY PRICE RANGE:", supply_zone)
 
                 demand_zone = {"min": "", "max": ""}
                 if y_min_d and y_max_d and price_map:
@@ -160,7 +148,6 @@ def stream_worker(url, symbol):
                     max_p = get_closest_price(y_min_d, price_map)
                     if min_p and max_p:
                         demand_zone = {"min": str(min_p), "max": str(max_p)}
-                    print("DEMAND PRICE RANGE:", demand_zone)
 
                 all_signals = []
                 for bbox, txt, _ in ocr_results:
@@ -195,8 +182,6 @@ def stream_worker(url, symbol):
                     "valid_position": valid_position
                 }
 
-                print("Final Aggregated Data:", aggregated)
-
                 try:
                     raw = r.lindex(f"{symbol}_signal", -1)
                     last_text = json.loads(raw).get("last_signal", {}).get("text", "") if raw else ""
@@ -216,7 +201,6 @@ def stream_worker(url, symbol):
             time.sleep(5)
 
         except Exception as e:
-            print(f"Error in stream_worker for {symbol}:", e)
             time.sleep(5)
             if 'stream' in locals():
                 stream.release()
@@ -235,5 +219,4 @@ if __name__ == "__main__":
     try:
         run_streams()
     except KeyboardInterrupt:
-        print("\nReceived Keyboard Interrupt. Exiting gracefully.")
         sys.exit(0)
