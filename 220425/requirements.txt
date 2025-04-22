@@ -1,0 +1,11 @@
+ccxt
+pyrebase
+python-dotenv
+websocket-client
+pycryptodome
+requests
+opencv-python-headless
+yt-dlp
+easyocr
+numpy
+redis
