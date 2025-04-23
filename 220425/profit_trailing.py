@@ -1,15 +1,20 @@
+# profit_trailing.py
+
 import time
 import logging
-import json
 from typing import Dict, Any, List, Optional, Tuple
 from exchange import DeltaExchangeClient
 import config
 from trade_manager import TradeManager
-from profit_trailing_rules import fixed_stop, lock_50_rule
+from profit_trailing_rules import fixed_stop
 
 logger = logging.getLogger(__name__)
 
 class ProfitTrailing:
+    """
+    Monitors open positions and updates trailing stops using live price updates
+    from a shared BinanceWebsocket instance.
+    """
     def __init__(self, ws_instance, check_interval: int = 1) -> None:
         self.ws = ws_instance
         self.client = DeltaExchangeClient()
@@ -23,20 +28,21 @@ class ProfitTrailing:
         self.last_display: Dict[Any, Dict[str, Any]] = {}
         self.position_max_profit: Dict[Any, float] = {}
         self.take_profit_detected: bool = False
+        self.target_long: Optional[float] = None
+        self.target_short: Optional[float] = None
 
-        # Zone-aware logic
-        self.demand_zone_min: Optional[float] = None
-        self.supply_zone_max: Optional[float] = None
-        self.current_supply_zone: Dict[str, Any] = {}
-        self.current_demand_zone: Dict[str, Any] = {}
-
-    def set_zone_limits(self, supply_max: Optional[float], demand_min: Optional[float],
-                        full_supply_zone: Optional[Dict[str, Any]] = None,
-                        full_demand_zone: Optional[Dict[str, Any]] = None) -> None:
-        self.supply_zone_max = supply_max
-        self.demand_zone_min = demand_min
-        self.current_supply_zone = full_supply_zone or {}
-        self.current_demand_zone = full_demand_zone or {}
+    def set_zone_limits(
+        self,
+        supply_max: Optional[float] = None,
+        demand_min: Optional[float] = None,
+        full_supply_zone: Any = None,
+        full_demand_zone: Any = None
+    ) -> None:
+        """
+        Store the zone limits for use as trade targets.
+        """
+        self.target_long = supply_max
+        self.target_short = demand_min
 
     def fetch_open_positions(self) -> List[Dict[str, Any]]:
         try:
@@ -48,8 +54,8 @@ class ProfitTrailing:
                 except Exception:
                     size = 0.0
                 if size != 0:
-                    pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', '')
-                    if pos_symbol and config.SYMBOL in pos_symbol:
+                    sym = pos.get('info', {}).get('product_symbol') or pos.get('symbol', '')
+                    if sym and config.SYMBOL in sym:
                         open_positions.append(pos)
             return open_positions
         except Exception as e:
@@ -62,11 +68,10 @@ class ProfitTrailing:
             entry = float(entry)
         except Exception:
             return None
-        size = 0.0
         try:
             size = float(pos.get('size') or pos.get('contracts') or 0)
         except Exception:
-            pass
+            size = 0.0
         if size > 0:
             return (live_price - entry) / entry
         else:
@@ -78,54 +83,58 @@ class ProfitTrailing:
             entry = float(entry)
         except Exception:
             return None
-        size = 0.0
         try:
             size = float(pos.get('size') or pos.get('contracts') or 0)
         except Exception:
-            pass
+            size = 0.0
         if size > 0:
             return (live_price - entry) * size
         else:
             return (entry - live_price) * abs(size)
 
-    def update_trailing_stop(self, pos: Dict[str, Any], live_price: float) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    def update_trailing_stop(
+        self,
+        pos: Dict[str, Any],
+        live_price: float
+    ) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', 'unknown')
         entry_val = pos.get('info', {}).get('entry_price') or pos.get('entryPrice')
-        size_val = pos.get('size') or pos.get('contracts')
+        size_val  = pos.get('size') or pos.get('contracts')
         key = f"{pos_symbol}_{entry_val}_{size_val}"
 
         try:
             entry = float(entry_val)
-            size = float(size_val or 0)
+            size  = float(size_val or 0)
         except Exception:
             return None, None, None
 
+        # compute and store max profit (absolute)
         current_profit = (live_price - entry) if size > 0 else (entry - live_price)
         prev_max = self.position_max_profit.get(key, 0)
-        new_max = max(prev_max, current_profit)
+        new_max  = max(prev_max, current_profit)
         self.position_max_profit[key] = new_max
 
-        # Apply trailing logic
-        if size < 0 and self.demand_zone_min and live_price <= self.demand_zone_min:
-            new_trailing = entry + (new_max * 0.9)
-            rule = "lock_90_zone"
-        elif size > 0 and self.supply_zone_max and live_price >= self.supply_zone_max:
-            new_trailing = entry - (new_max * 0.9)
-            rule = "lock_90_zone"
-        elif self.take_profit_detected:
+        # choose rule
+        if self.take_profit_detected:
             new_trailing = entry
-            rule = "move_sl_to_entry"
+            rule = "breakeven"
+        elif size > 0 and self.target_long is not None and live_price >= self.target_long:
+            new_trailing = entry + 0.9 * new_max
+            rule = "lock_90"
+        elif size < 0 and self.target_short is not None and live_price <= self.target_short:
+            new_trailing = entry - 0.9 * new_max
+            rule = "lock_90"
         else:
             new_trailing, rule = fixed_stop(entry, size)
 
         self.position_trailing_stop[key] = new_trailing
-        profit_pct = new_max / entry
+        profit_pct = new_max / entry if entry else None
         return new_trailing, profit_pct, rule
 
     def book_profit(self, pos: Dict[str, Any], live_price: float) -> bool:
         pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', 'unknown')
         entry_val = pos.get('info', {}).get('entry_price') or pos.get('entryPrice')
-        size_val = pos.get('size') or pos.get('contracts')
+        size_val  = pos.get('size') or pos.get('contracts')
         key = f"{pos_symbol}_{entry_val}_{size_val}"
         try:
             size = float(pos.get('size') or pos.get('contracts') or 0)
@@ -136,37 +145,32 @@ class ProfitTrailing:
         if trailing_stop is None:
             return False
 
-        if size > 0 and live_price < trailing_stop:
+        should_close = (live_price < trailing_stop) if size > 0 else (live_price > trailing_stop)
+        if should_close:
+            side = "sell" if size > 0 else "buy"
             try:
                 close = self.trade_manager.place_market_order(
-                    config.SYMBOL, "sell", size,
+                    config.SYMBOL, side, abs(size),
                     params={"time_in_force": "ioc"}, force=True
                 )
-                logger.info("Trailing stop triggered for %s. Closed: %s", key, close)
+                logger.info("%s stop triggered (%s). Closed: %s", rule, key, close)
                 return True
             except Exception as e:
-                logger.error("Failed to close %s on trailing stop: %s", key, e)
-                return False
-        elif size < 0 and live_price > trailing_stop:
-            try:
-                close = self.trade_manager.place_market_order(
-                    config.SYMBOL, "buy", abs(size),
-                    params={"time_in_force": "ioc"}, force=True
-                )
-                logger.info("Trailing stop triggered for %s. Closed: %s", key, close)
-                return True
-            except Exception as e:
-                logger.error("Failed to close %s on trailing stop: %s", key, e)
+                logger.error("Failed to close %s on %s stop: %s", key, rule, e)
                 return False
 
         return False
 
     def track(self) -> None:
-        wait_time = 0
-        while self.ws.current_price is None and wait_time < 30:
+        """
+        Main loop to monitor positions and update trailing stops.
+        """
+        # wait for price
+        wait = 0
+        while self.ws.current_price is None and wait < 30:
             logger.info("Waiting for live price update...")
             time.sleep(2)
-            wait_time += 2
+            wait += 2
 
         if self.ws.current_price is None:
             logger.warning("Live price not available. Exiting profit trailing tracker.")
@@ -177,27 +181,34 @@ class ProfitTrailing:
             if now - self.last_position_fetch_time >= self.position_fetch_interval:
                 self.cached_positions = self.fetch_open_positions()
                 self.last_position_fetch_time = now
-                if not self.cached_positions and self.last_had_positions:
-                    logger.info("No open positions. Profit trailing paused.")
-                    self.last_had_positions = False
 
+                if not self.cached_positions:
+                    if self.last_had_positions:
+                        logger.info("No open positions. Profit trailing paused.")
+                        self.last_had_positions = False
                     self.position_trailing_stop.clear()
                     self.position_max_profit.clear()
                     time.sleep(self.check_interval)
                     continue
+                else:
+                    if not self.last_had_positions:
+                        logger.info("Open positions detected. Profit trailing resumed.")
+                        self.last_had_positions = True
 
             live_price = self.ws.current_price
             if live_price is None:
                 time.sleep(self.check_interval)
                 continue
 
-            if self.cached_positions and not self.last_had_positions:
-                logger.info("Open positions detected. Profit trailing resumed.")
-                self.last_had_positions = True
-
             for pos in self.cached_positions:
-                entry_num = float(pos.get('info', {}).get('entry_price') or pos.get('entryPrice'))
-                size = float(pos.get('size') or pos.get('contracts') or 0)
+                try:
+                    entry_num = float(pos.get('info', {}).get('entry_price') or pos.get('entryPrice'))
+                except Exception:
+                    entry_num = None
+                try:
+                    size = float(pos.get('size') or pos.get('contracts') or 0)
+                except Exception:
+                    size = 0.0
                 if size == 0:
                     continue
 
@@ -205,21 +216,24 @@ class ProfitTrailing:
                 profit_display = profit_pct * 100
                 raw_profit = self.compute_raw_profit(pos, live_price) or 0
                 profit_usd = raw_profit / 1000
-                trailing_stop, _, rule = self.update_trailing_stop(pos, live_price)
 
-                max_profit = self.position_max_profit.get(
-                    f"{pos.get('info', {}).get('product_symbol')}_{pos.get('info', {}).get('entry_price')}_{pos.get('size')}",
-                    0
-                )
+                trailing_stop, _, rule = self.update_trailing_stop(pos, live_price)
+                # use consistent key logic
+                pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', 'unknown')
+                entry_val  = pos.get('info', {}).get('entry_price') or pos.get('entryPrice')
+                size_val   = pos.get('size') or pos.get('contracts')
+                key        = f"{pos_symbol}_{entry_val}_{size_val}"
+                max_profit = self.position_max_profit.get(key, 0)
+
                 try:
-                    api_pnl = float(pos.get('info', {}).get('unrealized_pnl') or 0)
+                    api_pnl   = float(pos.get('info', {}).get('unrealized_pnl') or 0)
                     api_entry = float(pos.get('info', {}).get('entry_price') or 0)
                 except Exception:
-                    api_pnl = 0.0
-                    api_entry = 0.0
+                    api_pnl = api_entry = 0.0
 
-                target = self.demand_zone_min if size < 0 else self.supply_zone_max
-                key = f"{pos.get('info', {}).get('product_symbol')}_{pos.get('info', {}).get('entry_price')}_{pos.get('size')}"
+                side   = "long" if size > 0 else "short"
+                target = self.target_long if size > 0 else self.target_short
+                target_str = f"{target:.2f}" if target is not None else "N/A"
 
                 display = {
                     "entry": entry_num,
@@ -230,16 +244,20 @@ class ProfitTrailing:
                     "api_pnl": round(api_pnl, 2),
                     "rule": rule,
                     "sl": round(trailing_stop or 0, 2),
-                    "target": round(target or 0, 2),
+                    "target": target_str,
                     "size": size,
-                    "side": "short" if size < 0 else "long",
-                    "max_profit": round(max_profit, 2),
-                    "supply_zone": self.current_supply_zone,
-                    "demand_zone": self.current_demand_zone
+                    "side": side,
+                    "max_profit": round(max_profit, 2)
                 }
 
                 if self.last_display.get(key) != display:
-                    logger.info(f"Order: {key} | {json.dumps(display)}")
+                    logger.info(
+                        "Order: %s | Size: %.0f (%s) | Entry: %.2f | Live: %.2f | PnL: %.2f%% | USD: %.2f | "
+                        "Max Profit: %.2f | Rule: %s | SL: %.2f | Target: %s",
+                        key, size, side, entry_num, live_price,
+                        profit_display, profit_usd, max_profit,
+                        rule, trailing_stop or 0, target_str
+                    )
                     self.last_display[key] = display
 
                 try:
