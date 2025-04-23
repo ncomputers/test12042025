@@ -184,15 +184,13 @@ def stream_worker(url, symbol):
 
                 try:
                     raw = r.lindex(f"{symbol}_signal", -1)
-                    last_text = json.loads(raw).get("last_signal", {}).get("text", "") if raw else ""
-                except Exception:
-                    last_text = ""
+                    last_text = raw and json.loads(raw).get("last_signal", {}).get("text", "") or ""
 
-                if aggregated["last_signal"]["text"] != last_text:
-                    try:
+                    new_text = aggregated["last_signal"]["text"]
+                    if new_text and new_text != last_text:
                         r.rpush(f"{symbol}_signal", json.dumps(aggregated))
                         print(f"[{symbol}] →", aggregated)
-                    except Exception as e:
+                except Exception as e:
                         print(f"Redis write error for {symbol}:", e)
 
                 time.sleep(10)
