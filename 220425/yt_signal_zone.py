@@ -67,7 +67,7 @@ def detect_zone_bounds(hsv_img, lower_hsv, upper_hsv):
     cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL)
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, KERNEL)
     ys = np.where(cleaned > 0)[0]
-    return (np.min(ys), np.max(ys)) if len(ys) > 0 else (None, None)
+    return (int(np.min(ys)), int(np.max(ys))) if len(ys) > 0 else (None, None)
 
 class YouTubeStream:
     def __init__(self, url):
@@ -117,10 +117,12 @@ def stream_worker(url, symbol):
                 hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
                 flatten_rnn(reader)
 
+                # OCR for signals
                 ocr_results = reader.readtext(gray)
                 y_min_s, y_max_s = detect_zone_bounds(hsv, *SUPPLY_HSV)
                 y_min_d, y_max_d = detect_zone_bounds(hsv, *DEMAND_HSV)
 
+                # OCR for price scale
                 scale_bar_region = frame[:, int(w * 0.90):]
                 scale_gray = cv2.cvtColor(scale_bar_region, cv2.COLOR_BGR2GRAY)
                 sharp = cv2.addWeighted(scale_gray, 1.5, cv2.GaussianBlur(scale_gray, (3, 3), 0), -0.5, 0)
@@ -128,27 +130,28 @@ def stream_worker(url, symbol):
 
                 ocr_price_data = reader.readtext(thresh)
                 price_map = []
-
                 for (bbox, text, _) in ocr_price_data:
                     y = int(bbox[0][1])
                     val = parse_price_label(text)
                     if val and is_valid_btc_price(val):
                         price_map.append((y, val))
 
+                # Build zones
                 supply_zone = {"min": "", "max": ""}
-                if y_min_s and y_max_s and price_map:
+                if y_min_s is not None and y_max_s is not None and price_map:
                     min_p = get_closest_price(y_max_s, price_map)
                     max_p = get_closest_price(y_min_s, price_map)
                     if min_p and max_p:
                         supply_zone = {"min": str(min_p), "max": str(max_p)}
 
                 demand_zone = {"min": "", "max": ""}
-                if y_min_d and y_max_d and price_map:
+                if y_min_d is not None and y_max_d is not None and price_map:
                     min_p = get_closest_price(y_max_d, price_map)
                     max_p = get_closest_price(y_min_d, price_map)
                     if min_p and max_p:
                         demand_zone = {"min": str(min_p), "max": str(max_p)}
 
+                # Detect latest signal
                 all_signals = []
                 for bbox, txt, _ in ocr_results:
                     tl, _, _, _ = bbox
@@ -159,19 +162,25 @@ def stream_worker(url, symbol):
                         all_signals.append({"x": abs_x, "y": abs_y, "text": fixed})
 
                 valid_position = None
-
                 if all_signals:
                     all_signals.sort(key=lambda s: s["x"], reverse=True)
                     sig = all_signals[0]
-                    sig_y = sig["y"]
                     current_signal_type = sig["text"]
-                    last_known_signal = {"text": current_signal_type, "price": "", "coordinates": f"{sig['x']},{sig['y']}"}
-                    dist_to_supply = abs(sig_y - y_min_s) if y_min_s else float('inf')
-                    dist_to_demand = abs(sig_y - y_max_d) if y_max_d else float('inf')
+                    last_known_signal = {
+                        "text": current_signal_type,
+                        "price": "",
+                        "coordinates": f"{sig['x']},{sig['y']}"
+                    }
+                    dist_to_supply = abs(sig["y"] - y_min_s) if y_min_s is not None else float('inf')
+                    dist_to_demand = abs(sig["y"] - y_max_d) if y_max_d is not None else float('inf')
                     if current_signal_type == "Buy Signal":
                         valid_position = dist_to_demand < dist_to_supply
                     elif current_signal_type == "Short Signal":
                         valid_position = dist_to_supply < dist_to_demand
+
+                # **CAST** numpy.bool_ → native bool (leave None as is)
+                if valid_position is not None:
+                    valid_position = bool(valid_position)
 
                 aggregated = {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -182,12 +191,14 @@ def stream_worker(url, symbol):
                     "valid_position": valid_position
                 }
 
+                # Compare with last pushed signal text
                 try:
                     raw = r.lindex(f"{symbol}_signal", -1)
                     last_text = json.loads(raw).get("last_signal", {}).get("text", "") if raw else ""
                 except Exception:
                     last_text = ""
 
+                # Only push on change
                 if aggregated["last_signal"]["text"] != last_text:
                     try:
                         r.rpush(f"{symbol}_signal", json.dumps(aggregated))
@@ -200,7 +211,7 @@ def stream_worker(url, symbol):
             stream.release()
             time.sleep(5)
 
-        except Exception as e:
+        except Exception:
             time.sleep(5)
             if 'stream' in locals():
                 stream.release()
