@@ -10,6 +10,12 @@ import config
 logger = logging.getLogger(__name__)
 
 class SignalProcessor:
+    """
+    Processes trading signals from Redis and executes order actions.
+    Uses a shared BinanceWebsocket instance for accessing live price.
+    If a ProfitTrailing instance is provided, its take_profit_detected flag is updated
+    when a take profit signal is detected.
+    """
     def __init__(self, ws_instance, profit_trailing: Optional[Any] = None) -> None:
         self.ws = ws_instance
         self.profit_trailing = profit_trailing
@@ -78,14 +84,14 @@ class SignalProcessor:
 
     def signals_are_different(self, new_signal: Dict[str, Any], old_signal: Optional[Dict[str, Any]]) -> bool:
         new_text = new_signal.get("last_signal", {}).get("text", "").strip().lower()
-        new_supply_max = new_signal.get("supply_zone", {}).get("max", "").strip()
-        new_demand_min = new_signal.get("demand_zone", {}).get("min", "").strip()
+        new_supply_max = new_signal.get("supply_zone", {}).get("max", "")
+        new_demand_min = new_signal.get("demand_zone", {}).get("min", "")
 
         old_text = old_supply_max = old_demand_min = ""
         if old_signal:
             old_text = old_signal.get("last_signal", {}).get("text", "").strip().lower()
-            old_supply_max = old_signal.get("supply_zone", {}).get("max", "").strip()
-            old_demand_min = old_signal.get("demand_zone", {}).get("min", "").strip()
+            old_supply_max = old_signal.get("supply_zone", {}).get("max", "")
+            old_demand_min = old_signal.get("demand_zone", {}).get("min", "")
 
         return (
             new_text != old_text or
@@ -100,6 +106,7 @@ class SignalProcessor:
         last_signal = signal_data.get("last_signal", {})
         signal_text = last_signal.get("text", "").lower()
 
+        # 1) Skip TP signals entirely
         if "take profit" in signal_text or "tp" in signal_text:
             logger.info("Take profit signal — no new order should be placed.")
             if self.profit_trailing:
@@ -125,7 +132,6 @@ class SignalProcessor:
                     full_supply_zone=supply_zone,
                     full_demand_zone=demand_zone
                 )
-
             except Exception as e:
                 logger.warning("Failed to set zone limits: %s", e)
 
@@ -140,7 +146,7 @@ class SignalProcessor:
             raw_price = float(raw_price)
 
         if valid_position is not True and ("short" in signal_text or "buy" in signal_text or "long" in signal_text):
-            logger.info("Signal has valid_position set to false or null — skipping entry.")
+            logger.info("Signal has valid_position=false — skipping entry.")
             return None
 
         try:
@@ -153,17 +159,28 @@ class SignalProcessor:
                     except Exception:
                         pos_size = 0.0
                     if "buy" in signal_text and pos_size < 0:
-                        logger.info("Opposite signal received: Closing short before buying.")
-                        self.trade_manager.place_market_order("BTCUSD", "buy", abs(pos_size), params={"time_in_force": "ioc"}, force=True)
+                        logger.info("Opposite signal: closing short before buy.")
+                        self.trade_manager.place_market_order("BTCUSD", "buy", abs(pos_size),
+                                                             params={"time_in_force": "ioc"}, force=True)
                         time.sleep(2)
                     elif ("sell" in signal_text or "short" in signal_text) and pos_size > 0:
-                        logger.info("Opposite signal received: Closing long before selling.")
-                        self.trade_manager.place_market_order("BTCUSD", "sell", pos_size, params={"time_in_force": "ioc"}, force=True)
+                        logger.info("Opposite signal: closing long before sell.")
+                        self.trade_manager.place_market_order("BTCUSD", "sell", pos_size,
+                                                             params={"time_in_force": "ioc"}, force=True)
                         time.sleep(2)
         except Exception as e:
             logger.error("Error handling opposite positions: %s", e)
 
-        side = "buy" if "buy" in signal_text or "long" in signal_text else "sell"
+        # 2) Determine side explicitly
+        if "buy" in signal_text or "long" in signal_text:
+            side = "buy"
+        elif "sell" in signal_text or "short" in signal_text:
+            side = "sell"
+        else:
+            logger.warning("Unable to determine side for '%s' — skipping.", signal_text)
+            return None
+
+        # 3) Cancel and reset any existing orders
         self.cancel_conflicting_orders("BTCUSD", side)
         self.cancel_same_side_orders("BTCUSD", side)
         time.sleep(2)
@@ -172,6 +189,7 @@ class SignalProcessor:
             logger.info("Open %s position exists. Skipping new order.", side)
             return None
 
+        # 4) Compute entry and SL
         if side == "buy":
             entry_price = raw_price - (raw_price * (config.ORDER_ENTRY_OFFSET_PERCENT / 100))
             sl_price = float(raw_demand_min) if raw_demand_min else raw_price - (raw_price * (config.ORDER_SL_OFFSET_PERCENT / 100))
@@ -181,8 +199,10 @@ class SignalProcessor:
 
         logger.info("Signal: %s | Entry: %.2f | SL: %.2f", last_signal.get("text"), entry_price, sl_price)
 
+        # 5) Place limit order + bracket
         try:
-            limit_order = self.order_manager.place_order("BTCUSD", side, 1, entry_price, params={"time_in_force": "gtc"})
+            limit_order = self.order_manager.place_order("BTCUSD", side, config.QUANTITY, entry_price,
+                                                         params={"time_in_force": "gtc"})
             logger.info("Limit order placed: %s", limit_order)
         except Exception as e:
             logger.error("Failed to place limit order: %s", e)
