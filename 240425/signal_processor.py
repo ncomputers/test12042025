@@ -1,3 +1,5 @@
+# signal_processor.py
+
 import time
 import json
 import redis
@@ -27,17 +29,12 @@ class SignalProcessor:
         self.last_signal: Optional[Dict[str, Any]] = None
 
     def fetch_signal(self, key: str = "BTCUSDT_signal") -> Optional[Dict[str, Any]]:
-        """
-        Fetch the latest signal JSON from Redis list using LRANGE -1,-1.
-        """
         try:
-            raw_list = self.redis_client.lrange(key, -1, -1)
-            if not raw_list:
+            raw = self.redis_client.lrange(key, -1, -1)
+            if not raw:
                 return None
-            raw = raw_list[0]
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            return json.loads(raw)
+            data = raw[0].decode() if isinstance(raw[0], bytes) else raw[0]
+            return json.loads(data)
         except Exception as e:
             logger.error("Error fetching signal from Redis (%s): %s", key, e)
             return None
@@ -48,7 +45,7 @@ class SignalProcessor:
                 if order.get("status", "").lower() != "open":
                     continue
                 side = order.get("side", "").lower()
-                if new_side and side == new_side.lower():
+                if side == new_side:
                     continue
                 self.order_manager.client.cancel_order(order["id"], symbol)
                 logger.info("Canceled conflicting order: %s", order["id"])
@@ -58,7 +55,7 @@ class SignalProcessor:
     def cancel_same_side_orders(self, symbol: str, side: str) -> None:
         try:
             for order in self.order_manager.client.exchange.fetch_open_orders(symbol):
-                if order.get("side", "").lower() == side.lower() and order.get("status", "").lower() == "open":
+                if order.get("side", "").lower() == side and order.get("status", "").lower() == "open":
                     self.order_manager.client.cancel_order(order["id"], symbol)
                     logger.info("Canceled same-side order: %s", order["id"])
         except Exception as e:
@@ -67,8 +64,8 @@ class SignalProcessor:
     def open_pending_order_exists(self, symbol: str, side: str) -> bool:
         try:
             return any(
-                order.get("side", "").lower() == side.lower() and order.get("status", "").lower() == "open"
-                for order in self.order_manager.client.exchange.fetch_open_orders(symbol)
+                o.get("side", "").lower() == side and o.get("status", "").lower() == "open"
+                for o in self.order_manager.client.exchange.fetch_open_orders(symbol)
             )
         except Exception as e:
             logger.error("Error checking pending orders: %s", e)
@@ -88,33 +85,42 @@ class SignalProcessor:
         return (new_text != old_text or new_supply != old_supply or new_demand != old_demand)
 
     def process_signal(self, signal_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        last_signal = signal_data.get("last_signal", {})
-        text        = last_signal.get("text", "").lower()
+        last = signal_data.get("last_signal", {})
+        text = last.get("text", "").lower()
+        valid = signal_data.get("valid_position", False)
 
-        # 1) Extract zones immediately and set targets
-        supply_zone    = signal_data.get("supply_zone", {})
-        demand_zone    = signal_data.get("demand_zone", {})
-        raw_supply_min = supply_zone.get("min")
-        raw_demand_max = demand_zone.get("max")
-        valid_pos      = signal_data.get("valid_position")
+        # determine new side
+        if "buy" in text or "long" in text:
+            new_side = "buy"
+        elif "sell" in text or "short" in text:
+            new_side = "sell"
+        else:
+            logger.warning("Unknown signal text '%s' — skipping.", text)
+            return None
 
+        logger.info("Processing %s signal (valid_position=%s)", new_side, valid)
+
+        # update zone limits
+        supply = signal_data.get("supply_zone", {})
+        demand = signal_data.get("demand_zone", {})
+        raw_supply = supply.get("min")
+        raw_demand = demand.get("max")
         if self.profit_trailing:
             try:
                 self.profit_trailing.set_zone_limits(
-                    supply_max=float(raw_supply_min) if raw_supply_min else None,
-                    demand_max=float(raw_demand_max) if raw_demand_max else None,
-                    full_supply_zone=supply_zone,
-                    full_demand_zone=demand_zone
+                    supply_max=float(raw_supply) if raw_supply else None,
+                    demand_max=float(raw_demand) if raw_demand else None,
+                    full_supply_zone=supply,
+                    full_demand_zone=demand
                 )
-                logger.info(
-                    "Zone targets set: long=%s, short=%s",
+                logger.info("Zone targets set: long=%s, short=%s",
                     self.profit_trailing.target_long,
                     self.profit_trailing.target_short
                 )
             except Exception as e:
                 logger.warning("Failed to set zone limits: %s", e)
 
-        # 2) Skip take-profit signals after setting targets
+        # skip TP signals
         if "take profit" in text or "tp" in text:
             logger.info("Take profit signal — skipping order placement.")
             if self.profit_trailing:
@@ -125,35 +131,33 @@ class SignalProcessor:
             if self.profit_trailing:
                 self.profit_trailing.take_profit_detected = False
 
-        # 3) Determine entry price from signal or live price
-        raw_price = last_signal.get("price")
-        if not raw_price:
-            live = self.ws.current_price
-            if live is None:
-                logger.error("No price available.")
+        # determine price
+        price = last.get("price")
+        if not price:
+            price = self.ws.current_price
+            if price is None:
+                logger.error("No price available — cannot proceed.")
                 return None
-            raw_price = live
-            logger.info("Using live price: %.2f", raw_price)
-        raw_price = float(raw_price)
+            logger.info("Using live price: %.2f", price)
+        price = float(price)
 
-        # 4) Skip if invalid position
-        if valid_pos is not True and any(k in text for k in ("buy", "short", "long")):
-            logger.info("valid_position=false — skipping.")
-            return None
-
-        # 5) Close opposite positions
+        # always close opposite
         try:
             for pos in self.order_manager.client.fetch_positions():
+                # filter to our symbol
+                sym = pos.get("info", {}).get("product_symbol") or pos.get("symbol", "")
+                if not sym.startswith(config.SYMBOL):
+                    continue
                 size = float(pos.get("size") or pos.get("contracts") or 0)
-                if "buy" in text and size < 0:
-                    logger.info("Closing short before buy.")
+                if new_side == "buy" and size < 0:
+                    logger.info("Closing short of size %.2f before buy.", abs(size))
                     self.trade_manager.place_market_order(
                         config.SYMBOL, "buy", abs(size),
                         params={"time_in_force": "ioc"}, force=True
                     )
                     time.sleep(2)
-                elif any(k in text for k in ("sell", "short")) and size > 0:
-                    logger.info("Closing long before sell.")
+                elif new_side == "sell" and size > 0:
+                    logger.info("Closing long of size %.2f before sell.", size)
                     self.trade_manager.place_market_order(
                         config.SYMBOL, "sell", size,
                         params={"time_in_force": "ioc"}, force=True
@@ -162,57 +166,53 @@ class SignalProcessor:
         except Exception as e:
             logger.error("Error closing opposite positions: %s", e)
 
-        # 6) Determine side
-        if any(k in text for k in ("buy", "long")):
-            side = "buy"
-        elif any(k in text for k in ("sell", "short")):
-            side = "sell"
-        else:
-            logger.warning("Unknown side '%s' — skipping.", text)
+        # skip new order if invalid
+        if not valid:
+            logger.info("valid_position=false — skipping new order placement.")
             return None
 
-        # 7) Cancel existing orders
-        self.cancel_conflicting_orders(config.SYMBOL, side)
-        self.cancel_same_side_orders(config.SYMBOL, side)
+        # cancel any open limit/bracket orders
+        self.cancel_conflicting_orders(config.SYMBOL, new_side)
+        self.cancel_same_side_orders(config.SYMBOL, new_side)
         time.sleep(2)
 
-        # 8) Skip if already in position
-        if self.order_manager.has_open_position(config.SYMBOL, side):
-            logger.info("Already in %s position — skipping.", side)
+        # skip if already in position
+        if self.order_manager.has_open_position(config.SYMBOL, new_side):
+            logger.info("Already in %s position — skipping new order.", new_side)
             return None
 
-        # 9) Compute entry & SL
-        if side == "buy":
-            entry_price = raw_price * (1 - config.ORDER_ENTRY_OFFSET_PERCENT / 100)
-            sl_price    = float(raw_demand_max) if raw_demand_max else raw_price * (1 - config.ORDER_SL_OFFSET_PERCENT / 100)
+        # compute entry & SL
+        if new_side == "buy":
+            entry = price * (1 - config.ORDER_ENTRY_OFFSET_PERCENT/100)
+            sl = float(raw_demand) if raw_demand else price * (1 - config.ORDER_SL_OFFSET_PERCENT/100)
         else:
-            entry_price = raw_price * (1 + config.ORDER_ENTRY_OFFSET_PERCENT / 100)
-            sl_price    = float(raw_supply_min) if raw_supply_min else raw_price * (1 + config.ORDER_SL_OFFSET_PERCENT / 100)
+            entry = price * (1 + config.ORDER_ENTRY_OFFSET_PERCENT/100)
+            sl = float(raw_supply) if raw_supply else price * (1 + config.ORDER_SL_OFFSET_PERCENT/100)
 
-        logger.info("Signal: %s | Entry: %.2f | SL: %.2f", last_signal.get("text"), entry_price, sl_price)
+        logger.info("Signal: %s | Entry: %.2f | SL: %.2f", last.get("text"), entry, sl)
 
-        # 10) Place order + bracket
+        # place limit + bracket
         try:
-            limit_order = self.order_manager.place_order(
-                config.SYMBOL, side, config.QUANTITY, entry_price,
+            order = self.order_manager.place_order(
+                config.SYMBOL, new_side, config.QUANTITY, entry,
                 params={"time_in_force": "gtc"}
             )
-            logger.info("Limit order placed: %s", limit_order)
+            logger.info("Limit order placed: %s", order)
         except Exception as e:
             logger.error("Failed to place limit order: %s", e)
             return None
 
-        bracket_params = {
-            "bracket_stop_loss_limit_price": str(sl_price),
-            "bracket_stop_loss_price":       str(sl_price),
+        bracket = {
+            "bracket_stop_loss_limit_price": str(sl),
+            "bracket_stop_loss_price":       str(sl),
             "bracket_stop_trigger_method":   "last_traded_price"
         }
         try:
             updated = self.order_manager.attach_bracket_to_order(
-                order_id=limit_order["id"],
+                order_id=order["id"],
                 product_id=27,
                 product_symbol=config.SYMBOL,
-                bracket_params=bracket_params
+                bracket_params=bracket
             )
             logger.info("Bracket attached: %s", updated)
             return updated
