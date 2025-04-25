@@ -47,7 +47,8 @@ class ProfitTrailing:
         """
         self.target_long = supply_max
         self.target_short = demand_max
-        logger.info("Zones primed → target_long=%s, target_short=%s", supply_max, demand_max)
+        # use ASCII arrow to avoid UnicodeEncodeError in Windows consoles
+        logger.info("Zones primed -> target_long=%s, target_short=%s", supply_max, demand_max)
 
     def fetch_open_positions(self) -> List[Dict[str, Any]]:
         try:
@@ -103,15 +104,14 @@ class ProfitTrailing:
         Return (trailing_stop, profit_pct, rule).
         """
         pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', 'unknown')
-        entry_val  = pos.get('info', {}).get('entry_price') or pos.get('entryPrice')
-        size_val   = pos.get('size') or pos.get('contracts')
+        # use the same floats for both storage and lookup
         try:
-            entry = float(entry_val)
-            size  = float(size_val or 0)
+            entry = float(pos.get('info', {}).get('entry_price') or pos.get('entryPrice'))
+            size  = float(pos.get('size') or pos.get('contracts') or 0)
         except Exception:
             return None, None, None
 
-        key = f"{pos_symbol}_{entry_val}_{size_val}"
+        key = f"{pos_symbol}_{entry}_{size}"
 
         # update max profit (absolute)
         current_profit = (live_price - entry) if size > 0 else (entry - live_price)
@@ -124,11 +124,9 @@ class ProfitTrailing:
             new_trailing = entry
             rule = "breakeven"
         elif size > 0 and self.target_long is not None and live_price >= self.target_long:
-            # lock 90% of profit on long
             new_trailing = entry + 0.9 * new_max
             rule = "lock_90"
         elif size < 0 and self.target_short is not None and live_price <= self.target_short:
-            # lock 90% on short
             new_trailing = entry - 0.9 * new_max
             rule = "lock_90"
         else:
@@ -143,14 +141,13 @@ class ProfitTrailing:
         If price crosses the trailing stop, close the position.
         """
         pos_symbol = pos.get('info', {}).get('product_symbol') or pos.get('symbol', 'unknown')
-        entry_val  = pos.get('info', {}).get('entry_price') or pos.get('entryPrice')
-        size_val   = pos.get('size') or pos.get('contracts')
-        key        = f"{pos_symbol}_{entry_val}_{size_val}"
-
         try:
-            size = float(pos.get('size') or pos.get('contracts') or 0)
+            entry = float(pos.get('info', {}).get('entry_price') or pos.get('entryPrice'))
+            size  = float(pos.get('size') or pos.get('contracts') or 0)
         except Exception:
             return False
+
+        key = f"{pos_symbol}_{entry}_{size}"
 
         trailing_stop, _, rule = self.update_trailing_stop(pos, live_price)
         if trailing_stop is None:
