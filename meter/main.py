@@ -177,7 +177,7 @@ async def global_aggregator():
                 f"sent:{e['sentiment']:+.2f}%  "
                 f"str:{e['strength']:+.2f}%"
             )
-            if abs(cur_vi) > 99:
+            if abs(cur_vi) > 95:
             # push the entire snapshot as a JSON string onto a Redis list named "vol_imb"
                 redis_client.rpush("vol_imb", json.dumps(snap))
 
