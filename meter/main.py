@@ -174,7 +174,7 @@ async def global_aggregator():
 
             # only write if any vol_imb >±95% or delta_vi >±50%
             trigger = any(
-                abs(snap["tf"][tf]["vol_imb"]) > 20
+                abs(snap["tf"][tf]["vol_imb"]) > 95
                 or abs((snap["tf"][tf]["vol_imb"] - (last_snapshot["tf"][tf]["vol_imb"]
                     if last_snapshot else 0))) > 50
                 for tf in TIMEFRAMES
